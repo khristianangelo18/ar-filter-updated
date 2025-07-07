@@ -11,10 +11,15 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.*
+import android.os.Handler
+import android.os.Looper
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
+import android.Manifest
 
 /**
- * Enhanced Voice Command Manager with Better Recognition
- * Includes debugging and improved command matching
+ * IMPROVED Voice Command Manager with Better Recognition
+ * Fixes "no speech match found" issues and improves reliability
  */
 class VoiceCommandManager(private val context: Context) {
 
@@ -31,6 +36,13 @@ class VoiceCommandManager(private val context: Context) {
     private val _debugInfo = MutableStateFlow("")
     val debugInfo: StateFlow<String> = _debugInfo.asStateFlow()
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var restartRunnable: Runnable? = null
+
+    // Add restart delay tracking to prevent rapid restarts
+    private var lastErrorTime = 0L
+    private var consecutiveErrors = 0
+
     // Voice command callbacks
     var onPlayStopCommand: ((Boolean) -> Unit)? = null
     var onLineHeightCommand: ((String) -> Unit)? = null
@@ -38,37 +50,41 @@ class VoiceCommandManager(private val context: Context) {
 
     companion object {
         private const val TAG = "VoiceCommandManager"
+        private const val MIN_RESTART_DELAY = 1000L // 1 second minimum
+        private const val MAX_RESTART_DELAY = 10000L // 10 seconds maximum
+        private const val MAX_CONSECUTIVE_ERRORS = 5
 
-        // IMPROVED: More comprehensive command patterns
-        private val PLAY_COMMANDS = listOf(
-            "start", "play", "begin", "go", "start workout", "start set",
-            "begin set", "resume", "continue", "let's go", "workout"
+        // SIMPLIFIED: More basic command patterns - easier to match
+        private val PLAY_COMMANDS = setOf(
+            "start", "play", "go", "begin", "resume"
         )
 
-        private val STOP_COMMANDS = listOf(
-            "stop", "pause", "halt", "end", "stop workout", "pause workout",
-            "stop set", "pause set", "finish", "done"
+        private val STOP_COMMANDS = setOf(
+            "stop", "pause", "halt", "end"
         )
 
-        private val INCREASE_LINE_COMMANDS = listOf(
-            "line up", "raise line", "move line up", "increase line", "line higher",
-            "up", "raise", "higher", "increase height", "move up", "line raise",
-            "go up", "lift up", "bring up"
+        private val LINE_UP_COMMANDS = setOf(
+            "up", "raise", "higher", "increase"
         )
 
-        private val DECREASE_LINE_COMMANDS = listOf(
-            "line down", "lower line", "move line down", "decrease line", "line lower",
-            "down", "lower", "smaller", "decrease height", "move down", "line down",
-            "go down", "bring down", "drop down"
+        private val LINE_DOWN_COMMANDS = setOf(
+            "down", "lower", "decrease", "smaller"
         )
 
-        private val VOICE_COACH_COMMANDS = listOf(
-            "toggle voice", "voice on", "voice off", "mute coach", "unmute coach",
-            "enable voice", "disable voice", "coach on", "coach off"
+        private val VOICE_TOGGLE_COMMANDS = setOf(
+            "voice", "mute", "unmute", "coach"
         )
     }
 
     fun initialize() {
+        // Check microphone permission first
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED) {
+            _debugInfo.value = "Microphone permission not granted"
+            Log.w(TAG, "Microphone permission not granted")
+            return
+        }
+
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
             Log.e(TAG, "Speech recognition not available on this device")
             _debugInfo.value = "Speech recognition not available"
@@ -76,14 +92,21 @@ class VoiceCommandManager(private val context: Context) {
         }
 
         try {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
-                setRecognitionListener(VoiceRecognitionListener())
-            }
+            createSpeechRecognizer()
             _debugInfo.value = "Voice recognition initialized"
             Log.d(TAG, "Voice Command Manager initialized successfully")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize speech recognizer", e)
             _debugInfo.value = "Failed to initialize: ${e.message}"
+        }
+    }
+
+    private fun createSpeechRecognizer() {
+        // Destroy existing recognizer first
+        speechRecognizer?.destroy()
+
+        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
+            setRecognitionListener(VoiceRecognitionListener())
         }
     }
 
@@ -94,19 +117,26 @@ class VoiceCommandManager(private val context: Context) {
             return
         }
 
+        // Cancel any pending restart
+        restartRunnable?.let { mainHandler.removeCallbacks(it) }
+
         speechRecognizer?.let { recognizer ->
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-                putExtra(RecognizerIntent.EXTRA_PROMPT, "Say a workout command...")
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 10) // Increased for better matching
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                // IMPROVED: Better timeout settings
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1000)
-                // IMPROVED: Prefer offline recognition if available
-                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
+
+                // IMPROVED: More lenient settings for better recognition
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false) // Disable partial results to reduce noise
+
+                // IMPROVED: Adjusted timeout settings for better reliability
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 500L)
+
+                // IMPROVED: Use online recognition for better accuracy
+                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)
             }
 
             try {
@@ -118,14 +148,20 @@ class VoiceCommandManager(private val context: Context) {
                 Log.e(TAG, "Failed to start listening", e)
                 _isListening.value = false
                 _debugInfo.value = "Failed to start listening: ${e.message}"
+                scheduleRestart(2000L) // Restart after 2 seconds
             }
         } ?: run {
             _debugInfo.value = "Speech recognizer not initialized"
+            Log.w(TAG, "Speech recognizer not initialized, attempting to recreate")
+            createSpeechRecognizer()
         }
     }
 
     fun stopListening() {
         try {
+            // Cancel any pending restart
+            restartRunnable?.let { mainHandler.removeCallbacks(it) }
+
             speechRecognizer?.stopListening()
             _isListening.value = false
             _debugInfo.value = "Stopped listening"
@@ -139,6 +175,9 @@ class VoiceCommandManager(private val context: Context) {
         _isEnabled.value = enabled
         if (!enabled) {
             stopListening()
+        } else {
+            // Reset error tracking when re-enabling
+            consecutiveErrors = 0
         }
         _debugInfo.value = if (enabled) "Voice commands enabled" else "Voice commands disabled"
         Log.d(TAG, "Voice commands ${if (enabled) "enabled" else "disabled"}")
@@ -150,11 +189,30 @@ class VoiceCommandManager(private val context: Context) {
         return newState
     }
 
+    private fun scheduleRestart(delay: Long) {
+        if (!_isEnabled.value) return
+
+        restartRunnable?.let { mainHandler.removeCallbacks(it) }
+
+        val actualDelay = delay.coerceIn(MIN_RESTART_DELAY, MAX_RESTART_DELAY)
+
+        restartRunnable = Runnable {
+            if (_isEnabled.value) {
+                Log.d(TAG, "Restarting speech recognition after ${actualDelay}ms delay")
+                startListening()
+            }
+        }
+
+        mainHandler.postDelayed(restartRunnable!!, actualDelay)
+    }
+
     private inner class VoiceRecognitionListener : RecognitionListener {
 
         override fun onReadyForSpeech(params: Bundle?) {
             Log.d(TAG, "Ready for speech")
             _debugInfo.value = "Ready - speak now!"
+            // Reset error tracking on successful start
+            consecutiveErrors = 0
         }
 
         override fun onBeginningOfSpeech() {
@@ -163,7 +221,7 @@ class VoiceCommandManager(private val context: Context) {
         }
 
         override fun onRmsChanged(rmsdB: Float) {
-            // Volume level changed - could show audio level indicator
+            // Could show audio level indicator here
         }
 
         override fun onBufferReceived(buffer: ByteArray?) {
@@ -176,51 +234,64 @@ class VoiceCommandManager(private val context: Context) {
         }
 
         override fun onError(error: Int) {
-            val errorMessage = when (error) {
-                SpeechRecognizer.ERROR_AUDIO -> "Audio recording error"
-                SpeechRecognizer.ERROR_CLIENT -> "Client side error"
-                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Insufficient permissions"
-                SpeechRecognizer.ERROR_NETWORK -> "Network error"
-                SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timeout"
-                SpeechRecognizer.ERROR_NO_MATCH -> "No speech match found"
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Recognition service busy"
-                SpeechRecognizer.ERROR_SERVER -> "Server error"
-                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech input detected"
-                else -> "Unknown error ($error)"
-            }
+            val currentTime = System.currentTimeMillis()
+            val errorMessage = getErrorMessage(error)
 
-            Log.e(TAG, "Speech recognition error: $errorMessage")
+            Log.e(TAG, "Speech recognition error: $errorMessage (code: $error)")
             _isListening.value = false
             _debugInfo.value = "Error: $errorMessage"
 
-            // IMPROVED: More intelligent restart logic
-            when (error) {
-                SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
-                SpeechRecognizer.ERROR_NO_MATCH -> {
-                    // These are common, restart quickly
-                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                        if (_isEnabled.value) {
-                            startListening()
-                        }
-                    }, 500)
+            // Track consecutive errors
+            if (currentTime - lastErrorTime < 5000) { // Within 5 seconds of last error
+                consecutiveErrors++
+            } else {
+                consecutiveErrors = 1
+            }
+            lastErrorTime = currentTime
+
+            // IMPROVED: Smarter restart logic based on error type and frequency
+            val restartDelay = when {
+                consecutiveErrors > MAX_CONSECUTIVE_ERRORS -> {
+                    Log.w(TAG, "Too many consecutive errors ($consecutiveErrors), stopping auto-restart")
+                    _debugInfo.value = "Too many errors - please restart manually"
+                    return // Don't auto-restart
                 }
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
-                    // Wait longer for busy error
-                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                        if (_isEnabled.value) {
-                            startListening()
-                        }
-                    }, 2000)
+
+                error == SpeechRecognizer.ERROR_NO_MATCH -> {
+                    // Most common error - restart quickly but not immediately
+                    1500L + (consecutiveErrors * 500L) // Increase delay with each error
                 }
+
+                error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                    // No speech detected - restart after short delay
+                    1000L + (consecutiveErrors * 300L)
+                }
+
+                error == SpeechRecognizer.ERROR_AUDIO -> {
+                    // Audio issues - wait longer and recreate recognizer
+                    createSpeechRecognizer()
+                    3000L + (consecutiveErrors * 1000L)
+                }
+
+                error == SpeechRecognizer.ERROR_NETWORK ||
+                        error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> {
+                    // Network issues - wait longer
+                    5000L + (consecutiveErrors * 2000L)
+                }
+
+                error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
+                    // Service busy - recreate and wait
+                    createSpeechRecognizer()
+                    4000L + (consecutiveErrors * 1500L)
+                }
+
                 else -> {
-                    // For other errors, wait longer or don't restart
-                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                        if (_isEnabled.value) {
-                            startListening()
-                        }
-                    }, 3000)
+                    // Other errors - moderate delay
+                    2000L + (consecutiveErrors * 1000L)
                 }
             }
+
+            scheduleRestart(restartDelay)
         }
 
         override fun onResults(results: Bundle?) {
@@ -230,31 +301,34 @@ class VoiceCommandManager(private val context: Context) {
             Log.d(TAG, "Speech results: $matches")
             Log.d(TAG, "Confidence scores: ${confidenceScores?.contentToString()}")
 
-            matches?.let {
-                _debugInfo.value = "Heard: ${matches.joinToString(", ")}"
-                processVoiceCommands(it, confidenceScores)
+            matches?.let { matchList ->
+                if (matchList.isNotEmpty()) {
+                    _debugInfo.value = "Heard: ${matchList[0]}"
+                    val commandProcessed = processVoiceCommands(matchList, confidenceScores)
+
+                    if (!commandProcessed) {
+                        _debugInfo.value = "No match: ${matchList[0]}"
+                        Log.d(TAG, "No matching command found in results")
+                    }
+                } else {
+                    _debugInfo.value = "Empty results"
+                    Log.d(TAG, "Received empty results list")
+                }
+            } ?: run {
+                _debugInfo.value = "No results"
+                Log.d(TAG, "No results in bundle")
             }
+
             _isListening.value = false
 
-            // Restart listening for continuous recognition
+            // Restart listening for continuous recognition if enabled
             if (_isEnabled.value) {
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    startListening()
-                }, 800) // Slightly longer delay for better performance
+                scheduleRestart(1000L) // 1 second delay for normal restart
             }
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
-            val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-            matches?.firstOrNull()?.let { partial ->
-                Log.d(TAG, "Partial result: $partial")
-                _debugInfo.value = "Hearing: $partial"
-
-                // IMPROVED: Process partial results for better responsiveness
-                if (partial.length > 3) { // Only process if we have substantial input
-                    processVoiceCommands(listOf(partial), null, isPartial = true)
-                }
-            }
+            // Disabled partial results for better stability
         }
 
         override fun onEvent(eventType: Int, params: Bundle?) {
@@ -262,96 +336,89 @@ class VoiceCommandManager(private val context: Context) {
         }
     }
 
-    // IMPROVED: Enhanced command processing with confidence scores
+    // SIMPLIFIED: Much simpler and more reliable command processing
     private fun processVoiceCommands(
         commands: List<String>,
-        confidenceScores: FloatArray? = null,
-        isPartial: Boolean = false
-    ) {
+        confidenceScores: FloatArray? = null
+    ): Boolean {
         for ((index, command) in commands.withIndex()) {
             val normalizedCommand = command.lowercase().trim()
             val confidence = confidenceScores?.getOrNull(index) ?: 0f
 
             Log.d(TAG, "Processing command: '$normalizedCommand' (confidence: $confidence)")
 
-            // Only process high-confidence results for partial matches
-            if (isPartial && confidence < 0.7f) {
+            // Skip very low confidence results
+            if (confidence < 0.3f && confidenceScores != null) {
                 continue
             }
 
             _lastCommand.value = normalizedCommand
 
-            // IMPROVED: More flexible matching with substring checks
-            when {
-                matchesAnyCommand(normalizedCommand, PLAY_COMMANDS) -> {
-                    Log.d(TAG, "✅ PLAY command detected: '$normalizedCommand'")
-                    _debugInfo.value = "Command: START"
-                    onPlayStopCommand?.invoke(true)
-                    return
-                }
+            // SIMPLIFIED: Check for simple keyword matches instead of complex patterns
+            val words = normalizedCommand.split("\\s+".toRegex())
 
-                matchesAnyCommand(normalizedCommand, STOP_COMMANDS) -> {
-                    Log.d(TAG, "✅ STOP command detected: '$normalizedCommand'")
-                    _debugInfo.value = "Command: STOP"
-                    onPlayStopCommand?.invoke(false)
-                    return
-                }
+            for (word in words) {
+                when {
+                    PLAY_COMMANDS.contains(word) -> {
+                        Log.d(TAG, "✅ PLAY command detected: '$word' in '$normalizedCommand'")
+                        _debugInfo.value = "Command: START"
+                        onPlayStopCommand?.invoke(true)
+                        return true
+                    }
 
-                matchesAnyCommand(normalizedCommand, INCREASE_LINE_COMMANDS) -> {
-                    Log.d(TAG, "✅ LINE UP command detected: '$normalizedCommand'")
-                    _debugInfo.value = "Command: LINE UP"
-                    onLineHeightCommand?.invoke("increase")
-                    return
-                }
+                    STOP_COMMANDS.contains(word) -> {
+                        Log.d(TAG, "✅ STOP command detected: '$word' in '$normalizedCommand'")
+                        _debugInfo.value = "Command: STOP"
+                        onPlayStopCommand?.invoke(false)
+                        return true
+                    }
 
-                matchesAnyCommand(normalizedCommand, DECREASE_LINE_COMMANDS) -> {
-                    Log.d(TAG, "✅ LINE DOWN command detected: '$normalizedCommand'")
-                    _debugInfo.value = "Command: LINE DOWN"
-                    onLineHeightCommand?.invoke("decrease")
-                    return
-                }
+                    LINE_UP_COMMANDS.contains(word) || normalizedCommand.contains("line up") -> {
+                        Log.d(TAG, "✅ LINE UP command detected: '$word' in '$normalizedCommand'")
+                        _debugInfo.value = "Command: LINE UP"
+                        onLineHeightCommand?.invoke("increase")
+                        return true
+                    }
 
-                matchesAnyCommand(normalizedCommand, VOICE_COACH_COMMANDS) -> {
-                    Log.d(TAG, "✅ VOICE TOGGLE command detected: '$normalizedCommand'")
-                    _debugInfo.value = "Command: TOGGLE VOICE"
-                    onVoiceCoachToggle?.invoke()
-                    return
+                    LINE_DOWN_COMMANDS.contains(word) || normalizedCommand.contains("line down") -> {
+                        Log.d(TAG, "✅ LINE DOWN command detected: '$word' in '$normalizedCommand'")
+                        _debugInfo.value = "Command: LINE DOWN"
+                        onLineHeightCommand?.invoke("decrease")
+                        return true
+                    }
+
+                    VOICE_TOGGLE_COMMANDS.contains(word) -> {
+                        Log.d(TAG, "✅ VOICE TOGGLE command detected: '$word' in '$normalizedCommand'")
+                        _debugInfo.value = "Command: TOGGLE VOICE"
+                        onVoiceCoachToggle?.invoke()
+                        return true
+                    }
                 }
             }
         }
 
         Log.d(TAG, "❌ No matching command found in: $commands")
-        _debugInfo.value = "No match: ${commands.firstOrNull() ?: "unknown"}"
+        return false
     }
 
-    // IMPROVED: Better command matching with fuzzy logic
-    private fun matchesAnyCommand(input: String, commandList: List<String>): Boolean {
-        return commandList.any { command ->
-            // Exact match
-            input == command ||
-                    // Contains match (for longer phrases)
-                    input.contains(command) ||
-                    // Reverse contains (for partial matches)
-                    command.contains(input) ||
-                    // Word-based matching
-                    containsAllWords(input, command)
-        }
-    }
-
-    // IMPROVED: Check if input contains all words from command
-    private fun containsAllWords(input: String, command: String): Boolean {
-        val inputWords = input.split(" ").filter { it.isNotEmpty() }
-        val commandWords = command.split(" ").filter { it.isNotEmpty() }
-
-        return commandWords.all { commandWord ->
-            inputWords.any { inputWord ->
-                inputWord.startsWith(commandWord) || commandWord.startsWith(inputWord)
-            }
+    private fun getErrorMessage(error: Int): String {
+        return when (error) {
+            SpeechRecognizer.ERROR_AUDIO -> "Audio recording error"
+            SpeechRecognizer.ERROR_CLIENT -> "Client side error"
+            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Insufficient permissions"
+            SpeechRecognizer.ERROR_NETWORK -> "Network error"
+            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timeout"
+            SpeechRecognizer.ERROR_NO_MATCH -> "No speech match found"
+            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Recognition service busy"
+            SpeechRecognizer.ERROR_SERVER -> "Server error"
+            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech input detected"
+            else -> "Unknown error ($error)"
         }
     }
 
     fun destroy() {
         stopListening()
+        restartRunnable?.let { mainHandler.removeCallbacks(it) }
         try {
             speechRecognizer?.destroy()
         } catch (e: Exception) {

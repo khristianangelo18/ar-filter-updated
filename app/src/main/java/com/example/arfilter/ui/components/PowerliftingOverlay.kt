@@ -51,15 +51,6 @@ fun PowerliftingOverlay(
             )
         }
 
-        // Voice Command Status Indicator
-        if (state.voiceCommandsEnabled) {
-            VoiceCommandIndicator(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 120.dp)
-            )
-        }
-
         // Line Height Indicator
         LineHeightIndicator(
             currentHeight = state.lineHeight,
@@ -213,49 +204,6 @@ private fun RestTimer(
                     fontWeight = FontWeight.Bold
                 )
             }
-        }
-    }
-}
-
-@Composable
-private fun VoiceCommandIndicator(
-    modifier: Modifier = Modifier
-) {
-    val infiniteTransition = rememberInfiniteTransition(label = "voice_pulse")
-    val alpha by infiniteTransition.animateFloat(
-        initialValue = 0.5f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1500, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "voice_alpha"
-    )
-
-    Card(
-        modifier = modifier,
-        colors = CardDefaults.cardColors(
-            containerColor = Color.Blue.copy(alpha = 0.8f)
-        ),
-        shape = RoundedCornerShape(20.dp)
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Icon(
-                Icons.Default.Mic,
-                contentDescription = "Voice Commands",
-                tint = Color.White.copy(alpha = alpha),
-                modifier = Modifier.size(16.dp)
-            )
-            Text(
-                text = "Voice Active",
-                color = Color.White,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium
-            )
         }
     }
 }

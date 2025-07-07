@@ -134,10 +134,9 @@ fun PowerliftingScreen(
     val voiceEnabled by voiceCoach.isEnabled.collectAsStateWithLifecycle()
     val voiceReady by voiceCoach.isReady.collectAsStateWithLifecycle()
 
-    // Voice command states
+    // Voice command states (but no UI display)
     val voiceCommandsEnabled by viewModel.state.collectAsStateWithLifecycle()
     val isListening by voiceCommandManager.isListening.collectAsStateWithLifecycle()
-    val lastCommand by voiceCommandManager.lastCommand.collectAsStateWithLifecycle()
 
     // Track previous state to detect actual changes
     var previousPhase by remember { mutableStateOf<LiftPhase?>(null) }
@@ -296,7 +295,7 @@ fun PowerliftingScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // Powerlifting Overlay - The main AR feature (NOW WITH DYNAMIC LINE HEIGHT)
+        // Powerlifting Overlay - The main AR feature
         PowerliftingOverlay(
             state = state,
             modifier = Modifier.fillMaxSize()
@@ -346,57 +345,6 @@ fun PowerliftingScreen(
             }
         }
 
-        // Voice Command Status Display
-        if (state.voiceCommandsEnabled && hasMicrophonePermission) {
-            VoiceCommandStatusCard(
-                isListening = isListening,
-                lastCommand = lastCommand,
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .offset(y = (-160).dp)
-            )
-        }
-
-        // Voice Status Indicator (replaces form cues text)
-        if (state.isActive && state.restTime <= 0) {
-            Card(
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .offset(y = (-200).dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = Color.Black.copy(alpha = 0.7f)
-                ),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        imageVector = if (voiceEnabled) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
-                        contentDescription = "Voice Status",
-                        tint = if (voiceEnabled) Color.Green else Color.Gray,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Text(
-                        text = if (voiceEnabled) "Voice Coach ON" else "Voice Coach OFF",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    if (voiceReady) {
-                        Icon(
-                            imageVector = Icons.Default.Check,
-                            contentDescription = "TTS Ready",
-                            tint = Color.Green,
-                            modifier = Modifier.size(12.dp)
-                        )
-                    }
-                }
-            }
-        }
-
         // Tempo Indicator (Bottom Left)
         if (state.showTempo) {
             Card(
@@ -427,7 +375,7 @@ fun PowerliftingScreen(
             }
         }
 
-        // Quick Action Buttons (Bottom Center) - WITH VOICE COMMAND TOGGLE
+        // Quick Action Buttons (Bottom Center) - CLEANED UP
         QuickActionButtons(
             state = state,
             voiceEnabled = voiceEnabled,
@@ -526,47 +474,6 @@ fun PowerliftingScreen(
                     showControls = true
                 }
             )
-        }
-    }
-}
-
-// Voice Command Status Card
-@Composable
-private fun VoiceCommandStatusCard(
-    isListening: Boolean,
-    lastCommand: String,
-    modifier: Modifier = Modifier
-) {
-    AnimatedVisibility(
-        visible = isListening || lastCommand.isNotEmpty(),
-        enter = fadeIn() + scaleIn(),
-        exit = fadeOut() + scaleOut(),
-        modifier = modifier
-    ) {
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = if (isListening) Color.Red.copy(alpha = 0.8f) else Color.Green.copy(alpha = 0.8f)
-            ),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Row(
-                modifier = Modifier.padding(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Icon(
-                    imageVector = if (isListening) Icons.Default.Mic else Icons.Default.Check,
-                    contentDescription = if (isListening) "Listening" else "Command Received",
-                    tint = Color.White,
-                    modifier = Modifier.size(16.dp)
-                )
-                Text(
-                    text = if (isListening) "Listening..." else "\"$lastCommand\"",
-                    color = Color.White,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
         }
     }
 }
@@ -750,7 +657,7 @@ private fun WelcomeOverlay(
                     InstructionItem("🟡 Yellow Light: Pause at bottom")
                     InstructionItem("🟢 Green Light: Drive up strong")
                     InstructionItem("🔊 Voice Coach: Real-time form cues")
-                    InstructionItem("🎤 Voice Commands: \"Start\", \"Stop\", \"Line up/down\"")
+                    InstructionItem("🎤 Voice Commands: \"Start\", \"Stop\", \"Up\", \"Down\"")
                     InstructionItem("👆 Tap: Hide/show controls")
                     InstructionItem("👆👆 Double tap: Switch camera")
                 }
@@ -790,7 +697,6 @@ private fun InstructionItem(text: String) {
         modifier = Modifier.fillMaxWidth()
     )
 }
-
 @Composable
 fun PowerliftingControlsPanel(
     state: PowerliftingState,
@@ -1428,6 +1334,68 @@ private fun TempoRow(
     }
 }
 
+// Section Header
+@Composable
+private fun SectionHeader(
+    title: String,
+    icon: ImageVector
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Icon(
+            icon,
+            contentDescription = title,
+            tint = Color.White,
+            modifier = Modifier.size(20.dp)
+        )
+        Text(
+            text = title,
+            color = Color.White,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+// Photo capture function
+private suspend fun capturePhoto(
+    context: Context,
+    imageCapture: ImageCapture?,
+    cameraExecutor: ExecutorService
+) {
+    imageCapture ?: return
+
+    val name = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
+        .format(System.currentTimeMillis())
+    val contentValues = android.content.ContentValues().apply {
+        put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+        put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+        put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/PowerliftingAR")
+    }
+
+    val outputOptions = ImageCapture.OutputFileOptions.Builder(
+        context.contentResolver,
+        android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+        contentValues
+    ).build()
+
+    imageCapture.takePicture(
+        outputOptions,
+        ContextCompat.getMainExecutor(context),
+        object : ImageCapture.OnImageSavedCallback {
+            override fun onError(exception: ImageCaptureException) {
+                Log.e("PowerliftingScreen", "Photo capture failed: ${exception.message}", exception)
+            }
+
+            override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                Log.d("PowerliftingScreen", "Photo captured successfully")
+            }
+        }
+    )
+}
+
 // Set Configuration Section
 @Composable
 private fun SetConfigurationSection(
@@ -1694,66 +1662,3 @@ private fun ActionButtonsSection(
         }
     }
 }
-
-// Section Header
-@Composable
-private fun SectionHeader(
-    title: String,
-    icon: ImageVector
-) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Icon(
-            icon,
-            contentDescription = title,
-            tint = Color.White,
-            modifier = Modifier.size(20.dp)
-        )
-        Text(
-            text = title,
-            color = Color.White,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Bold
-        )
-    }
-}
-
-// Photo capture function
-private suspend fun capturePhoto(
-    context: Context,
-    imageCapture: ImageCapture?,
-    cameraExecutor: ExecutorService
-) {
-    imageCapture ?: return
-
-    val name = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
-        .format(System.currentTimeMillis())
-    val contentValues = android.content.ContentValues().apply {
-        put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
-        put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-        put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/PowerliftingAR")
-    }
-
-    val outputOptions = ImageCapture.OutputFileOptions.Builder(
-        context.contentResolver,
-        android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-        contentValues
-    ).build()
-
-    imageCapture.takePicture(
-        outputOptions,
-        ContextCompat.getMainExecutor(context),
-        object : ImageCapture.OnImageSavedCallback {
-            override fun onError(exception: ImageCaptureException) {
-                Log.e("PowerliftingScreen", "Photo capture failed: ${exception.message}", exception)
-            }
-
-            override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                Log.d("PowerliftingScreen", "Photo captured successfully")
-            }
-        }
-    )
-}
-
