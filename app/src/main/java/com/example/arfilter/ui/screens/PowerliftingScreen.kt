@@ -3,14 +3,13 @@ package com.example.arfilter.ui.screens
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.util.Log
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageCapture
-import androidx.camera.core.ImageCaptureException
-import androidx.camera.core.Preview
+import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.*
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -26,7 +25,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -46,6 +51,16 @@ import com.example.arfilter.utils.VoiceCoachManager
 import com.example.arfilter.utils.VoiceCommandManager
 import com.example.arfilter.utils.announcePhaseTransition
 import com.example.arfilter.utils.getExerciseIcon
+// Import barbell detection components
+import com.example.arfilter.detector.YOLOv11ObjectDetector
+import com.example.arfilter.detector.BitmapUtils
+import com.example.arfilter.detector.Detection
+import com.example.arfilter.detector.BarPathAnalyzer
+import com.example.arfilter.detector.AutomaticPathManager
+import com.example.arfilter.detector.PathPoint
+import com.example.arfilter.detector.BarPath
+import com.example.arfilter.detector.MovementDirection
+import com.example.arfilter.detector.MovementAnalysis
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
@@ -69,6 +84,39 @@ fun PowerliftingScreen(
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var showControls by remember { mutableStateOf(false) }
 
+    // Background Barbell Detection States
+    var barbellDetections by remember { mutableStateOf<List<Detection>>(emptyList()) }
+    var isDetectionProcessing by remember { mutableStateOf(false) }
+    var detectionFps by remember { mutableStateOf(0f) }
+    var showBarbellTracking by remember { mutableStateOf(false) } // Toggle for background detection
+
+    // Bar Path Tracking States
+    val pathManager = remember { AutomaticPathManager() }
+    var barPaths by remember { mutableStateOf<List<BarPath>>(emptyList()) }
+    var pathAnalysis by remember { mutableStateOf<MovementAnalysis?>(null) }
+    var totalBarbellReps by remember { mutableStateOf(0) }
+
+    // Barbell Detector (lazy initialization)
+    val barbellDetector = remember {
+        try {
+            YOLOv11ObjectDetector(
+                context = context,
+                modelPath = "optimizefloat16.tflite", // Your YOLOv11 model
+                confThreshold = 0.3f,
+                iouThreshold = 0.45f
+            )
+        } catch (e: Exception) {
+            Log.e("PowerliftingScreen", "Failed to initialize barbell detector: ${e.message}", e)
+            null
+        }
+    }
+
+    val pathAnalyzer = remember { BarPathAnalyzer() }
+
+    // FPS calculation for detection
+    var frameCount by remember { mutableStateOf(0) }
+    var lastFpsUpdate by remember { mutableStateOf(System.currentTimeMillis()) }
+
     // Check microphone permission
     var hasMicrophonePermission by remember {
         mutableStateOf(
@@ -84,7 +132,6 @@ fun PowerliftingScreen(
     // Enhanced Voice Coach Manager with interval control
     val voiceCoach = remember {
         VoiceCoachManager(context).apply {
-            // Configure intervals for less irritating feedback
             updateIntervals(
                 samePhaseInterval = 10000L,      // 10 seconds between same phase cues
                 motivationalInterval = 20000L,    // 20 seconds between motivational cues
@@ -96,12 +143,10 @@ fun PowerliftingScreen(
     // Voice Command Manager
     val voiceCommandManager = remember {
         VoiceCommandManager(context).apply {
-            // Set up voice command callbacks
             onPlayStopCommand = { shouldPlay ->
                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                 viewModel.handlePlayStopCommand(shouldPlay)
 
-                // Provide voice feedback
                 if (voiceCoach.isEnabled.value && voiceCoach.isReady.value) {
                     val message = if (shouldPlay) "Starting workout" else "Stopping workout"
                     voiceCoach.speak(message, VoiceCoachManager.Priority.HIGH)
@@ -112,7 +157,6 @@ fun PowerliftingScreen(
                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                 viewModel.adjustLineHeight(direction)
 
-                // Provide voice feedback
                 if (voiceCoach.isEnabled.value && voiceCoach.isReady.value) {
                     val message = when (direction.lowercase()) {
                         "increase", "up", "raise", "higher" -> "Line raised"
@@ -134,7 +178,7 @@ fun PowerliftingScreen(
     val voiceEnabled by voiceCoach.isEnabled.collectAsStateWithLifecycle()
     val voiceReady by voiceCoach.isReady.collectAsStateWithLifecycle()
 
-    // Voice command states (but no UI display)
+    // Voice command states
     val voiceCommandsEnabled by viewModel.state.collectAsStateWithLifecycle()
     val isListening by voiceCommandManager.isListening.collectAsStateWithLifecycle()
 
@@ -164,18 +208,18 @@ fun PowerliftingScreen(
         }
     }
 
-    // Clean up voice managers
+    // Clean up voice managers and detector
     DisposableEffect(Unit) {
         onDispose {
             voiceCoach.shutdown()
             voiceCommandManager.destroy()
+            barbellDetector?.close()
         }
     }
 
-    // Smart phase change detection with interval control
+    // Voice coaching effects (same as before)
     LaunchedEffect(state.currentPhase, state.isActive, voiceEnabled, voiceReady) {
         if (voiceReady && voiceEnabled && state.isActive && state.restTime <= 0) {
-            // Only announce if phase actually changed
             if (state.currentPhase != previousPhase) {
                 Log.d("VoiceCoach", "Phase changed from $previousPhase to ${state.currentPhase}")
                 voiceCoach.announcePhaseTransition(
@@ -188,10 +232,8 @@ fun PowerliftingScreen(
         }
     }
 
-    // Smart rep counting with interval control
     LaunchedEffect(state.repCount, state.isActive, voiceEnabled) {
         if (voiceReady && voiceEnabled && state.isActive && state.restTime <= 0) {
-            // Only announce if rep count actually increased
             if (state.repCount > previousRepCount) {
                 Log.d("VoiceCoach", "Rep count changed from $previousRepCount to ${state.repCount}")
                 voiceCoach.announceRepCount(state.repCount, state.targetReps)
@@ -200,29 +242,23 @@ fun PowerliftingScreen(
         }
     }
 
-    // Set completion announcements
     LaunchedEffect(state.setCount, voiceEnabled) {
         if (voiceReady && voiceEnabled) {
-            // Only announce if set count actually increased (set completed)
             if (state.setCount > previousSetCount) {
                 Log.d("VoiceCoach", "Set completed: ${state.setCount}")
                 voiceCoach.announceSetComplete(state.setCount, previousRepCount)
                 previousSetCount = state.setCount
-
-                // Reset for new set
                 previousRepCount = 0
                 previousPhase = null
             }
         }
     }
 
-    // Smart rest period announcements
     LaunchedEffect(state.restTime, voiceEnabled) {
         if (voiceReady && voiceEnabled && state.restTime > 0) {
-            // Only announce at specific intervals during rest
             val shouldAnnounceRest = when (state.restTime) {
-                in 1..5 -> true  // Final countdown
-                10, 15, 30, 60 -> true  // Key milestones
+                in 1..5 -> true
+                10, 15, 30, 60 -> true
                 else -> false
             }
 
@@ -233,10 +269,8 @@ fun PowerliftingScreen(
         }
     }
 
-    // Reset voice coach for new workout
     LaunchedEffect(state.isActive) {
         if (state.isActive && previousSetCount == 0 && previousRepCount == 0) {
-            // Starting a new workout
             voiceCoach.resetForNewWorkout()
             Log.d("VoiceCoach", "Starting new workout - reset voice coach")
         }
@@ -248,8 +282,8 @@ fun PowerliftingScreen(
         cameraProvider = cameraProviderFuture.get()
     }
 
-    // Bind camera when selector changes
-    LaunchedEffect(cameraSelector, cameraProvider) {
+    // Enhanced camera binding with barbell detection
+    LaunchedEffect(cameraSelector, cameraProvider, showBarbellTracking) {
         cameraProvider?.let { provider ->
             try {
                 val preview = Preview.Builder().build().also {
@@ -258,13 +292,85 @@ fun PowerliftingScreen(
 
                 imageCapture = ImageCapture.Builder().build()
 
+                // Add image analysis for barbell detection when enabled
+                val analysisUseCase = if (showBarbellTracking && barbellDetector != null) {
+                    ImageAnalysis.Builder()
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build()
+                        .also { analysis ->
+                            analysis.setAnalyzer(cameraExecutor) { imageProxy ->
+                                if (!isDetectionProcessing) {
+                                    isDetectionProcessing = true
+
+                                    try {
+                                        val bitmap = BitmapUtils.imageProxyToBitmap(imageProxy)
+                                        val detections = barbellDetector.detect(bitmap)
+                                        barbellDetections = detections
+
+                                        val currentTime = System.currentTimeMillis()
+
+                                        // Process bar path tracking if detections exist
+                                        if (detections.isNotEmpty()) {
+                                            val updatedPaths = pathManager.addDetection(detections.first(), currentTime)
+                                            barPaths = updatedPaths
+
+                                            // Analyze movement if we have active paths
+                                            if (updatedPaths.isNotEmpty()) {
+                                                val activePath = updatedPaths.last()
+                                                if (activePath.points.size > 10) {
+                                                    pathAnalysis = pathAnalyzer.analyzeMovement(activePath.points)
+
+                                                    // Count total reps across all paths
+                                                    totalBarbellReps = updatedPaths.sumOf { path ->
+                                                        if (path.points.size > 20) {
+                                                            pathAnalyzer.analyzeMovement(path.points)?.repCount ?: 0
+                                                        } else 0
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Calculate detection FPS
+                                        frameCount++
+                                        if (currentTime - lastFpsUpdate >= 1000) {
+                                            detectionFps = frameCount * 1000f / (currentTime - lastFpsUpdate)
+                                            frameCount = 0
+                                            lastFpsUpdate = currentTime
+                                        }
+
+                                    } catch (e: Exception) {
+                                        Log.e("BarbellDetection", "Error processing frame: ${e.message}", e)
+                                    } finally {
+                                        isDetectionProcessing = false
+                                        imageProxy.close()
+                                    }
+                                } else {
+                                    imageProxy.close()
+                                }
+                            }
+                        }
+                } else null
+
                 provider.unbindAll()
-                provider.bindToLifecycle(
-                    lifecycleOwner,
-                    cameraSelector,
-                    preview,
-                    imageCapture
-                )
+
+                // Bind appropriate use cases
+                if (analysisUseCase != null) {
+                    provider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        preview,
+                        imageCapture,
+                        analysisUseCase
+                    )
+                } else {
+                    provider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        preview,
+                        imageCapture
+                    )
+                }
+
             } catch (e: Exception) {
                 Log.e("PowerliftingScreen", "Camera binding failed", e)
             }
@@ -295,19 +401,34 @@ fun PowerliftingScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // Powerlifting Overlay - The main AR feature
+        // Background Barbell Detection Overlay (when enabled)
+        if (showBarbellTracking) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                // Draw barbell detections
+                drawBarbellDetections(barbellDetections, barbellDetector)
+
+                // Draw bar paths
+                drawBarPaths(barPaths)
+            }
+        }
+
+        // Powerlifting Overlay - The main AR feature (always on top)
         PowerliftingOverlay(
             state = state,
             modifier = Modifier.fillMaxSize()
         )
 
-        // Quick Stats Panel (Top Left)
-        PowerliftingStatsPanel(
+        // Quick Stats Panel (Top Left) - Enhanced with barbell detection info
+        EnhancedStatsPanel(
             state = state,
+            barbellDetections = barbellDetections,
+            totalBarbellReps = totalBarbellReps,
+            detectionFps = detectionFps,
+            showBarbellTracking = showBarbellTracking,
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .padding(start = 16.dp, top = 60.dp)
-                .width(180.dp)
+                .width(200.dp)
         )
 
         // Rep Counter (Top Right)
@@ -341,6 +462,15 @@ fun PowerliftingScreen(
                         color = Color.Gray,
                         fontSize = 10.sp
                     )
+
+                    // Show barbell detection reps if enabled
+                    if (showBarbellTracking && totalBarbellReps > 0) {
+                        Text(
+                            text = "Auto: $totalBarbellReps",
+                            color = Color.Cyan,
+                            fontSize = 8.sp
+                        )
+                    }
                 }
             }
         }
@@ -375,24 +505,23 @@ fun PowerliftingScreen(
             }
         }
 
-        // Quick Action Buttons (Bottom Center) - CLEANED UP
-        QuickActionButtons(
+        // Enhanced Quick Action Buttons
+        EnhancedQuickActionButtons(
             state = state,
             voiceEnabled = voiceEnabled,
             isTtsReady = voiceReady,
             voiceCommandsEnabled = state.voiceCommandsEnabled,
             isListening = isListening,
+            showBarbellTracking = showBarbellTracking,
             onStartPause = {
                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                 if (state.isActive) {
                     viewModel.pauseSet()
-                    // Announce pause (but only if not recently announced)
                     if (voiceEnabled && voiceReady) {
                         voiceCoach.speak("Workout paused", VoiceCoachManager.Priority.HIGH, allowRepeat = false)
                     }
                 } else {
                     viewModel.startSet()
-                    // Announce start (always allowed for session start)
                     if (voiceEnabled && voiceReady) {
                         voiceCoach.speak("Starting set", VoiceCoachManager.Priority.HIGH, allowRepeat = true)
                     }
@@ -410,11 +539,15 @@ fun PowerliftingScreen(
                 previousRepCount = 0
                 previousSetCount = 0
                 previousRestTime = 0
+
+                // Clear bar paths
+                pathManager.clearAllPaths()
+                barPaths = emptyList()
+                totalBarbellReps = 0
             },
             onCompleteSet = {
                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                 viewModel.completeSet()
-                // Set completion will be announced by the LaunchedEffect above
             },
             onToggleVoice = {
                 val newState = voiceCoach.toggleEnabled()
@@ -424,6 +557,20 @@ fun PowerliftingScreen(
             onToggleVoiceCommands = {
                 viewModel.toggleVoiceCommands()
                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+            },
+            onToggleBarbellTracking = {
+                showBarbellTracking = !showBarbellTracking
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+
+                // Clear paths when disabling
+                if (!showBarbellTracking) {
+                    pathManager.clearAllPaths()
+                    barPaths = emptyList()
+                    barbellDetections = emptyList()
+                    totalBarbellReps = 0
+                }
+
+                Log.d("BarbellTracking", "Barbell tracking toggled to: $showBarbellTracking")
             },
             onSwitchCamera = {
                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -440,18 +587,35 @@ fun PowerliftingScreen(
                 .padding(bottom = 40.dp)
         )
 
-        // Full Controls Panel (Slide up when needed)
+        // Full Controls Panel (Enhanced with barbell detection controls)
         AnimatedVisibility(
             visible = showControls,
             enter = slideInVertically { it } + fadeIn(),
             exit = slideOutVertically { it } + fadeOut(),
             modifier = Modifier.align(Alignment.BottomCenter)
         ) {
-            PowerliftingControlsPanel(
+            EnhancedPowerliftingControlsPanel(
                 state = state,
                 viewModel = viewModel,
                 voiceCoach = voiceCoach,
                 voiceCommandManager = voiceCommandManager,
+                showBarbellTracking = showBarbellTracking,
+                onToggleBarbellTracking = {
+                    showBarbellTracking = !showBarbellTracking
+                    if (!showBarbellTracking) {
+                        pathManager.clearAllPaths()
+                        barPaths = emptyList()
+                        barbellDetections = emptyList()
+                        totalBarbellReps = 0
+                    }
+                },
+                onClearBarPaths = {
+                    pathManager.clearAllPaths()
+                    barPaths = emptyList()
+                    barbellDetections = emptyList()
+                    totalBarbellReps = 0
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                },
                 onCapturePhoto = {
                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                     scope.launch {
@@ -467,7 +631,7 @@ fun PowerliftingScreen(
         var showWelcome by remember { mutableStateOf(true) }
 
         if (showWelcome) {
-            WelcomeOverlay(
+            EnhancedWelcomeOverlay(
                 onDismiss = { showWelcome = false },
                 onStartWorkout = {
                     showWelcome = false
@@ -478,44 +642,176 @@ fun PowerliftingScreen(
     }
 }
 
+// Enhanced Stats Panel with Barbell Detection Info
 @Composable
-private fun QuickActionButtons(
+private fun EnhancedStatsPanel(
+    state: PowerliftingState,
+    barbellDetections: List<Detection>,
+    totalBarbellReps: Int,
+    detectionFps: Float,
+    showBarbellTracking: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(
+            containerColor = Color.Black.copy(alpha = 0.85f)
+        ),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Exercise Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = state.selectedExercise.displayName,
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = state.tempo.displayName,
+                        color = Color.Gray,
+                        fontSize = 12.sp
+                    )
+                }
+
+                // Status Indicator
+                StatusIndicator(
+                    isActive = state.isActive,
+                    isPaused = state.isPaused,
+                    currentPhase = state.currentPhase
+                )
+            }
+
+            // Progress Stats
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                StatItem(
+                    label = "SET",
+                    value = "${state.setCount + 1}",
+                    icon = Icons.Default.Layers,
+                    color = Color.Blue
+                )
+                StatItem(
+                    label = "REP",
+                    value = "${state.repCount}/${state.targetReps}",
+                    icon = Icons.Default.Repeat,
+                    color = Color.Green
+                )
+            }
+
+            // Barbell Detection Info (when enabled)
+            if (showBarbellTracking) {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "BARBELL DETECTION",
+                        color = Color.Cyan,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "FPS: ${String.format("%.1f", detectionFps)}",
+                            color = Color.Gray,
+                            fontSize = 9.sp
+                        )
+                        Text(
+                            text = "Detected: ${barbellDetections.size}",
+                            color = if (barbellDetections.isNotEmpty()) Color.Green else Color.Gray,
+                            fontSize = 9.sp
+                        )
+                    }
+
+                    if (totalBarbellReps > 0) {
+                        Text(
+                            text = "Auto Reps: $totalBarbellReps",
+                            color = Color.Cyan,
+                            fontSize = 9.sp
+                        )
+                    }
+                }
+            }
+
+            // Rest Timer (if active)
+            if (state.restTime > 0) {
+                RestTimeIndicator(restTime = state.restTime)
+            }
+        }
+    }
+}
+
+// Enhanced Quick Action Buttons with Barbell Detection Toggle
+@Composable
+private fun EnhancedQuickActionButtons(
     state: PowerliftingState,
     voiceEnabled: Boolean,
     isTtsReady: Boolean,
     voiceCommandsEnabled: Boolean,
     isListening: Boolean,
+    showBarbellTracking: Boolean,
     onStartPause: () -> Unit,
     onStop: () -> Unit,
     onCompleteSet: () -> Unit,
     onToggleVoice: () -> Unit,
     onToggleVoiceCommands: () -> Unit,
+    onToggleBarbellTracking: () -> Unit,
     onSwitchCamera: () -> Unit,
     onToggleControls: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Row(
         modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         // 1. Settings/Controls Toggle
         FloatingActionButton(
             onClick = onToggleControls,
-            modifier = Modifier.size(48.dp),
+            modifier = Modifier.size(44.dp),
             containerColor = Color.Black.copy(alpha = 0.7f)
         ) {
             Icon(
                 Icons.Default.Settings,
                 contentDescription = "Controls",
-                tint = Color.White
+                tint = Color.White,
+                modifier = Modifier.size(20.dp)
             )
         }
 
-        // 2. Voice Commands Toggle Button
+        // 2. Barbell Detection Toggle
+        FloatingActionButton(
+            onClick = onToggleBarbellTracking,
+            modifier = Modifier.size(44.dp),
+            containerColor = if (showBarbellTracking) Color(0xFF00BCD4) else Color.Gray
+        ) {
+            Icon(
+                imageVector = Icons.Default.TrackChanges,
+                contentDescription = "Toggle Barbell Detection",
+                tint = Color.White,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+
+        // 3. Voice Commands Toggle Button
         FloatingActionButton(
             onClick = onToggleVoiceCommands,
-            modifier = Modifier.size(48.dp),
+            modifier = Modifier.size(44.dp),
             containerColor = if (voiceCommandsEnabled) {
                 if (isListening) Color.Red else Color(0xFF4CAF50)
             } else Color.Gray
@@ -525,27 +821,29 @@ private fun QuickActionButtons(
                     if (isListening) Icons.Default.MicOff else Icons.Default.Mic
                 } else Icons.Default.MicOff,
                 contentDescription = "Toggle Voice Commands",
-                tint = Color.White
+                tint = Color.White,
+                modifier = Modifier.size(20.dp)
             )
         }
 
-        // 3. Voice Coach Toggle Button
+        // 4. Voice Coach Toggle Button
         FloatingActionButton(
             onClick = onToggleVoice,
-            modifier = Modifier.size(48.dp),
+            modifier = Modifier.size(44.dp),
             containerColor = if (voiceEnabled) Color(0xFF4CAF50) else Color.Gray
         ) {
             Icon(
                 imageVector = if (voiceEnabled) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
                 contentDescription = "Toggle Voice Coach",
-                tint = Color.White
+                tint = Color.White,
+                modifier = Modifier.size(20.dp)
             )
         }
 
-        // 4. Start/Pause Button (CENTRAL PLAY BUTTON - PROMINENT)
+        // 5. Start/Pause Button (CENTRAL PLAY BUTTON - PROMINENT)
         FloatingActionButton(
             onClick = onStartPause,
-            modifier = Modifier.size(72.dp), // Made larger for prominence
+            modifier = Modifier.size(68.dp), // Made larger for prominence
             containerColor = if (state.isActive && !state.isPaused) Color(0xFFFF8C00) else Color.Green,
             elevation = FloatingActionButtonDefaults.elevation(
                 defaultElevation = 8.dp,
@@ -556,33 +854,35 @@ private fun QuickActionButtons(
                 imageVector = if (state.isActive && !state.isPaused) Icons.Default.Pause else Icons.Default.PlayArrow,
                 contentDescription = if (state.isActive && !state.isPaused) "Pause" else "Start",
                 tint = Color.White,
-                modifier = Modifier.size(36.dp) // Larger icon for central button
+                modifier = Modifier.size(32.dp) // Larger icon for central button
             )
         }
 
-        // 5. Stop Button
+        // 6. Stop Button
         FloatingActionButton(
             onClick = onStop,
-            modifier = Modifier.size(48.dp),
+            modifier = Modifier.size(44.dp),
             containerColor = if (state.isActive) Color.Red else Color.Red.copy(alpha = 0.5f)
         ) {
             Icon(
                 Icons.Default.Stop,
                 contentDescription = "Stop Session",
-                tint = Color.White
+                tint = Color.White,
+                modifier = Modifier.size(20.dp)
             )
         }
 
-        // 6. Camera Switch
+        // 7. Camera Switch
         FloatingActionButton(
             onClick = onSwitchCamera,
-            modifier = Modifier.size(48.dp),
+            modifier = Modifier.size(44.dp),
             containerColor = Color.Black.copy(alpha = 0.7f)
         ) {
             Icon(
                 Icons.Default.FlipCameraAndroid,
                 contentDescription = "Switch Camera",
-                tint = Color.White
+                tint = Color.White,
+                modifier = Modifier.size(20.dp)
             )
         }
 
@@ -590,22 +890,23 @@ private fun QuickActionButtons(
         if (state.isActive && !state.isPaused) {
             FloatingActionButton(
                 onClick = onCompleteSet,
-                modifier = Modifier.size(40.dp),
+                modifier = Modifier.size(36.dp),
                 containerColor = Color(0xFF4CAF50)
             ) {
                 Icon(
                     Icons.Default.Check,
                     contentDescription = "Complete Set",
                     tint = Color.White,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(16.dp)
                 )
             }
         }
     }
 }
 
+// Enhanced Welcome Overlay with Barbell Detection Info
 @Composable
-private fun WelcomeOverlay(
+private fun EnhancedWelcomeOverlay(
     onDismiss: () -> Unit,
     onStartWorkout: () -> Unit
 ) {
@@ -644,7 +945,7 @@ private fun WelcomeOverlay(
                 )
 
                 Text(
-                    text = "Your AI voice coach will guide you through perfect form and tempo during your lifts. Now with voice commands!",
+                    text = "Your AI voice coach with automatic barbell detection for perfect form and tempo tracking.",
                     color = Color.Gray,
                     fontSize = 16.sp,
                     textAlign = TextAlign.Center
@@ -658,6 +959,8 @@ private fun WelcomeOverlay(
                     InstructionItem("🟢 Green Light: Drive up strong")
                     InstructionItem("🔊 Voice Coach: Real-time form cues")
                     InstructionItem("🎤 Voice Commands: \"Start\", \"Stop\", \"Up\", \"Down\"")
+                    InstructionItem("🎯 Barbell Detection: Automatic tracking (optional)")
+                    InstructionItem("📊 Bar Path: Real-time movement analysis")
                     InstructionItem("👆 Tap: Hide/show controls")
                     InstructionItem("👆👆 Double tap: Switch camera")
                 }
@@ -697,12 +1000,17 @@ private fun InstructionItem(text: String) {
         modifier = Modifier.fillMaxWidth()
     )
 }
+
+// Enhanced Controls Panel with Barbell Detection Settings
 @Composable
-fun PowerliftingControlsPanel(
+fun EnhancedPowerliftingControlsPanel(
     state: PowerliftingState,
     viewModel: PowerliftingViewModel,
     voiceCoach: VoiceCoachManager,
     voiceCommandManager: VoiceCommandManager,
+    showBarbellTracking: Boolean,
+    onToggleBarbellTracking: () -> Unit,
+    onClearBarPaths: () -> Unit,
     onCapturePhoto: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
@@ -718,7 +1026,7 @@ fun PowerliftingControlsPanel(
     Card(
         modifier = modifier
             .fillMaxWidth()
-            .heightIn(max = 700.dp),
+            .heightIn(max = 750.dp),
         colors = CardDefaults.cardColors(
             containerColor = Color.Black.copy(alpha = 0.95f)
         ),
@@ -750,6 +1058,13 @@ fun PowerliftingControlsPanel(
                     )
                 }
             }
+
+            // Barbell Detection Settings Section (NEW)
+            BarbellDetectionSettingsSection(
+                showBarbellTracking = showBarbellTracking,
+                onToggleBarbellTracking = onToggleBarbellTracking,
+                onClearBarPaths = onClearBarPaths
+            )
 
             // Voice Command Settings Section
             VoiceCommandSettingsSection(
@@ -809,7 +1124,283 @@ fun PowerliftingControlsPanel(
     }
 }
 
-// Voice Command Settings Section
+// NEW: Barbell Detection Settings Section
+@Composable
+private fun BarbellDetectionSettingsSection(
+    showBarbellTracking: Boolean,
+    onToggleBarbellTracking: () -> Unit,
+    onClearBarPaths: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        SectionHeader(
+            title = "BARBELL DETECTION",
+            icon = Icons.Default.TrackChanges
+        )
+
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = Color.Gray.copy(alpha = 0.2f)
+            ),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                // Main barbell detection toggle
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "Background Detection",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = if (showBarbellTracking) "AI tracking active" else "Manual mode only",
+                            color = if (showBarbellTracking) Color.Cyan else Color.Gray,
+                            fontSize = 12.sp
+                        )
+                    }
+                    Switch(
+                        checked = showBarbellTracking,
+                        onCheckedChange = { onToggleBarbellTracking() },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.Cyan,
+                            checkedTrackColor = Color.Cyan.copy(alpha = 0.5f),
+                            uncheckedThumbColor = Color.Gray,
+                            uncheckedTrackColor = Color.Gray.copy(alpha = 0.3f)
+                        )
+                    )
+                }
+
+                if (showBarbellTracking) {
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Text(
+                        text = "Features:",
+                        color = Color.Gray,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+
+                    val features = listOf(
+                        "• Real-time barbell detection using YOLOv11",
+                        "• Automatic bar path tracking",
+                        "• Movement analysis and rep counting",
+                        "• Background processing (doesn't interfere with AR)",
+                        "• Cyan overlay shows detected barbells and paths"
+                    )
+
+                    features.forEach { feature ->
+                        Text(
+                            text = feature,
+                            color = Color.Gray,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(start = 8.dp, top = 2.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Clear paths button
+                    Button(
+                        onClick = onClearBarPaths,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color.Red.copy(alpha = 0.7f)
+                        )
+                    ) {
+                        Icon(
+                            Icons.Default.Clear,
+                            contentDescription = "Clear Paths",
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Clear Bar Paths")
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Drawing functions for barbell detection overlay
+private fun DrawScope.drawBarbellDetections(
+    detections: List<Detection>,
+    detector: YOLOv11ObjectDetector?
+) {
+    if (detector == null) return
+
+    val canvasWidth = size.width
+    val canvasHeight = size.height
+
+    detections.forEachIndexed { index, detection ->
+        val bbox = detection.bbox
+
+        val left = (bbox.left * canvasWidth).coerceIn(0f, canvasWidth)
+        val top = (bbox.top * canvasHeight).coerceIn(0f, canvasHeight)
+        val right = (bbox.right * canvasWidth).coerceIn(0f, canvasWidth)
+        val bottom = (bbox.bottom * canvasHeight).coerceIn(0f, canvasHeight)
+
+        val centerX = (left + right) / 2f
+        val centerY = (top + bottom) / 2f
+
+        // Draw center point
+        drawCircle(
+            color = Color.White,
+            radius = 3.dp.toPx(),
+            center = Offset(centerX, centerY)
+        )
+
+        // Draw bounding box if large enough
+        if (right > left + 20f && bottom > top + 20f) {
+            drawRect(
+                color = Color.White,
+                topLeft = Offset(left, top),
+                size = androidx.compose.ui.geometry.Size(right - left, bottom - top),
+                style = Stroke(width = 2.dp.toPx())
+            )
+
+            // Draw label
+
+        }
+    }
+}
+
+private fun DrawScope.drawBarPaths(paths: List<BarPath>) {
+    val canvasWidth = size.width
+    val canvasHeight = size.height
+    val currentTime = System.currentTimeMillis()
+
+    paths.forEachIndexed { pathIndex, path ->
+        val points = path.points
+        if (points.size > 1) {
+            // Draw path with time-based fade effect
+            for (i in 0 until points.size - 1) {
+                val startPoint = points[i]
+                val endPoint = points[i + 1]
+
+                val startX = startPoint.x * canvasWidth
+                val startY = startPoint.y * canvasHeight
+                val endX = endPoint.x * canvasWidth
+                val endY = endPoint.y * canvasHeight
+
+                // Time-based alpha (newer points are more opaque)
+                val timeSincePoint = currentTime - endPoint.timestamp
+                val maxAge = 15000L // 15 seconds
+                val alpha = (1f - (timeSincePoint.toFloat() / maxAge)).coerceIn(0.2f, 1f)
+
+                drawLine(
+                    color = Color.Cyan.copy(alpha = alpha),
+                    start = Offset(startX, startY),
+                    end = Offset(endX, endY),
+                    strokeWidth = 2.dp.toPx(),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 4f), 0f)
+                )
+            }
+
+            // Draw current position (last point) with emphasis
+            if (points.isNotEmpty()) {
+                val lastPoint = points.last()
+                val pointX = lastPoint.x * canvasWidth
+                val pointY = lastPoint.y * canvasHeight
+
+                drawCircle(
+                    color = Color.White,
+                    radius = 4.dp.toPx(),
+                    center = Offset(pointX, pointY)
+                )
+
+                // Outer ring for emphasis
+                drawCircle(
+                    color = Color.White.copy(alpha = 0.5f),
+                    radius = 8.dp.toPx(),
+                    center = Offset(pointX, pointY),
+                    style = Stroke(width = 2.dp.toPx())
+                )
+            }
+        }
+    }
+}
+
+// Helper components from the original PowerliftingScreen that need to be copied
+@Composable
+private fun StatusIndicator(
+    isActive: Boolean,
+    isPaused: Boolean,
+    currentPhase: LiftPhase
+) {
+    val color = when {
+        !isActive -> Color.Gray
+        isPaused -> Color(0xFFFF8C00) // Orange
+        else -> when (currentPhase) {
+            LiftPhase.READY -> Color.White
+            LiftPhase.ECCENTRIC -> Color.Red
+            LiftPhase.BOTTOM -> Color.Yellow
+            LiftPhase.CONCENTRIC -> Color.Green
+            LiftPhase.TOP -> Color.Blue
+            LiftPhase.REST -> Color(0xFFFF8C00)
+        }
+    }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .background(
+                    color = color,
+                    shape = androidx.compose.foundation.shape.CircleShape
+                )
+        )
+        Text(
+            text = when {
+                !isActive -> "READY"
+                isPaused -> "PAUSED"
+                else -> currentPhase.name
+            },
+            color = Color.White,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
+@Composable
+private fun StatItem(
+    label: String,
+    value: String,
+    icon: ImageVector,
+    color: Color = Color.White
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Icon(
+            icon,
+            contentDescription = label,
+            tint = color,
+            modifier = Modifier.size(16.dp)
+        )
+        Text(
+            text = label,
+            color = Color.Gray,
+            fontSize = 10.sp
+        )
+        Text(
+            text = value,
+            color = Color.White,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
 @Composable
 private fun VoiceCommandSettingsSection(
     voiceCommandManager: VoiceCommandManager,
@@ -830,7 +1421,6 @@ private fun VoiceCommandSettingsSection(
             shape = RoundedCornerShape(12.dp)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                // Main voice commands toggle
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -862,16 +1452,13 @@ private fun VoiceCommandSettingsSection(
                         onCheckedChange = { onToggleVoiceCommands() },
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = Color.Blue,
-                            checkedTrackColor = Color.Blue.copy(alpha = 0.5f),
-                            uncheckedThumbColor = Color.Gray,
-                            uncheckedTrackColor = Color.Gray.copy(alpha = 0.3f)
+                            checkedTrackColor = Color.Blue.copy(alpha = 0.5f)
                         )
                     )
                 }
 
                 if (voiceCommandsEnabled) {
                     Spacer(modifier = Modifier.height(12.dp))
-
                     Text(
                         text = "Available Commands:",
                         color = Color.Gray,
@@ -901,7 +1488,6 @@ private fun VoiceCommandSettingsSection(
     }
 }
 
-// Voice Coach Settings Section
 @Composable
 private fun VoiceCoachSettingsSection(
     voiceCoach: VoiceCoachManager,
@@ -924,7 +1510,6 @@ private fun VoiceCoachSettingsSection(
             shape = RoundedCornerShape(12.dp)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                // Main voice toggle
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -959,9 +1544,7 @@ private fun VoiceCoachSettingsSection(
                         enabled = voiceReady,
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = Color.Green,
-                            checkedTrackColor = Color.Green.copy(alpha = 0.5f),
-                            uncheckedThumbColor = Color.Gray,
-                            uncheckedTrackColor = Color.Gray.copy(alpha = 0.3f)
+                            checkedTrackColor = Color.Green.copy(alpha = 0.5f)
                         )
                     )
                 }
@@ -969,7 +1552,6 @@ private fun VoiceCoachSettingsSection(
                 if (voiceEnabled) {
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    // Advanced settings toggle
                     TextButton(
                         onClick = { showAdvancedSettings = !showAdvancedSettings },
                         colors = ButtonDefaults.textButtonColors(contentColor = Color.Cyan)
@@ -996,31 +1578,6 @@ private fun VoiceCoachSettingsSection(
                                 fontSize = 12.sp
                             )
 
-                            // Voice mode toggles
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                VoiceToggleSetting(
-                                    label = "Detailed Cues",
-                                    description = "More detailed form instructions",
-                                    checked = voiceCoach.verboseMode,
-                                    onCheckedChange = { voiceCoach.verboseMode = it }
-                                )
-
-                                VoiceToggleSetting(
-                                    label = "Motivational",
-                                    description = "Encouraging phrases and motivation",
-                                    checked = voiceCoach.motivationalMode,
-                                    onCheckedChange = { voiceCoach.motivationalMode = it }
-                                )
-
-                                VoiceToggleSetting(
-                                    label = "Rep Counting",
-                                    description = "Voice rep announcements",
-                                    checked = voiceCoach.countdownEnabled,
-                                    onCheckedChange = { voiceCoach.countdownEnabled = it }
-                                )
-                            }
-
-                            // Test voice button
                             Button(
                                 onClick = {
                                     voiceCoach.speak(
@@ -1050,45 +1607,6 @@ private fun VoiceCoachSettingsSection(
 }
 
 @Composable
-private fun VoiceToggleSetting(
-    label: String,
-    description: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = label,
-                color = Color.White,
-                fontSize = 14.sp
-            )
-            Text(
-                text = description,
-                color = Color.Gray,
-                fontSize = 12.sp
-            )
-        }
-
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = Color.Cyan,
-                checkedTrackColor = Color.Cyan.copy(alpha = 0.5f),
-                uncheckedThumbColor = Color.Gray,
-                uncheckedTrackColor = Color.Gray.copy(alpha = 0.3f)
-            )
-        )
-    }
-}
-
-// Line Height Control Section
-@Composable
 private fun LineHeightControlSection(
     currentHeight: Float,
     onHeightChange: (Float) -> Unit
@@ -1109,7 +1627,6 @@ private fun LineHeightControlSection(
                 modifier = Modifier.padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                // Current height display
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1130,12 +1647,11 @@ private fun LineHeightControlSection(
                     )
                 }
 
-                // Height adjustment slider
                 Slider(
                     value = currentHeight,
                     onValueChange = onHeightChange,
                     valueRange = 200f..500f,
-                    steps = 11, // 25dp increments
+                    steps = 11,
                     colors = SliderDefaults.colors(
                         thumbColor = Color.Cyan,
                         activeTrackColor = Color.Cyan,
@@ -1143,7 +1659,6 @@ private fun LineHeightControlSection(
                     )
                 )
 
-                // Manual adjustment buttons
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceEvenly
@@ -1179,7 +1694,6 @@ private fun LineHeightControlSection(
     }
 }
 
-// Exercise Selection Section
 @Composable
 private fun ExerciseSelectionSection(
     selectedExercise: ExerciseType,
@@ -1255,7 +1769,6 @@ private fun ExerciseCard(
     }
 }
 
-// Tempo Selection Section
 @Composable
 private fun TempoSelectionSection(
     selectedTempo: Tempo,
@@ -1334,7 +1847,267 @@ private fun TempoRow(
     }
 }
 
-// Section Header
+@Composable
+private fun SetConfigurationSection(
+    targetReps: Int,
+    onTargetRepsChange: (Int) -> Unit,
+    currentSet: Int
+) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        SectionHeader(
+            title = "SET CONFIGURATION",
+            icon = Icons.Default.Repeat
+        )
+
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = Color.Gray.copy(alpha = 0.2f)
+            ),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "SET ${currentSet + 1}",
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Current Set",
+                        color = Color.Gray,
+                        fontSize = 14.sp
+                    )
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    IconButton(
+                        onClick = { onTargetRepsChange(targetReps - 1) },
+                        enabled = targetReps > 1
+                    ) {
+                        Icon(
+                            Icons.Default.Remove,
+                            contentDescription = "Decrease reps",
+                            tint = Color.White,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "$targetReps",
+                            color = Color.White,
+                            fontSize = 32.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "REPS",
+                            color = Color.Gray,
+                            fontSize = 14.sp
+                        )
+                    }
+
+                    IconButton(
+                        onClick = { onTargetRepsChange(targetReps + 1) },
+                        enabled = targetReps < 20
+                    ) {
+                        Icon(
+                            Icons.Default.Add,
+                            contentDescription = "Increase reps",
+                            tint = Color.White,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DisplayOptionsSection(
+    showFormCues: Boolean,
+    showTempo: Boolean,
+    onToggleFormCues: () -> Unit,
+    onToggleTempo: () -> Unit
+) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        SectionHeader(
+            title = "DISPLAY OPTIONS",
+            icon = Icons.Default.Visibility
+        )
+
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = Color.Gray.copy(alpha = 0.2f)
+            ),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onToggleFormCues() },
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Info,
+                            contentDescription = "Form Cues",
+                            tint = Color.White,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Column {
+                            Text(
+                                text = "Form Cues",
+                                color = Color.White,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = "Show technique reminders",
+                                color = Color.Gray,
+                                fontSize = 14.sp
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = showFormCues,
+                        onCheckedChange = { onToggleFormCues() },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.Green,
+                            checkedTrackColor = Color.Green.copy(alpha = 0.5f)
+                        )
+                    )
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onToggleTempo() },
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Speed,
+                            contentDescription = "Tempo Display",
+                            tint = Color.White,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Column {
+                            Text(
+                                text = "Tempo Display",
+                                color = Color.White,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = "Show timing indicators",
+                                color = Color.Gray,
+                                fontSize = 14.sp
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = showTempo,
+                        onCheckedChange = { onToggleTempo() },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.Blue,
+                            checkedTrackColor = Color.Blue.copy(alpha = 0.5f)
+                        )
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActionButtonsSection(
+    onCapturePhoto: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        SectionHeader(
+            title = "ACTIONS",
+            icon = Icons.Default.CameraAlt
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Button(
+                onClick = onCapturePhoto,
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color.Blue
+                )
+            ) {
+                Icon(
+                    Icons.Default.CameraAlt,
+                    contentDescription = "Capture",
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "CAPTURE",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Button(
+                onClick = onDismiss,
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color.Gray
+                )
+            ) {
+                Icon(
+                    Icons.Default.Close,
+                    contentDescription = "Close",
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "CLOSE",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun SectionHeader(
     title: String,
@@ -1396,269 +2169,45 @@ private suspend fun capturePhoto(
     )
 }
 
-// Set Configuration Section
 @Composable
-private fun SetConfigurationSection(
-    targetReps: Int,
-    onTargetRepsChange: (Int) -> Unit,
-    currentSet: Int
-) {
-    Column(
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+private fun RestTimeIndicator(restTime: Int) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = Color(0xFFFF8C00).copy(alpha = 0.2f) // Orange
+        ),
+        shape = RoundedCornerShape(6.dp)
     ) {
-        SectionHeader(
-            title = "SET CONFIGURATION",
-            icon = Icons.Default.Repeat
-        )
-
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = Color.Gray.copy(alpha = 0.2f)
-            ),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(20.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(
-                        text = "SET ${currentSet + 1}",
-                        color = Color.White,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "Current Set",
-                        color = Color.Gray,
-                        fontSize = 14.sp
-                    )
-                }
-
-                // Rep counter controls
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    IconButton(
-                        onClick = { onTargetRepsChange(targetReps - 1) },
-                        enabled = targetReps > 1
-                    ) {
-                        Icon(
-                            Icons.Default.Remove,
-                            contentDescription = "Decrease reps",
-                            tint = Color.White,
-                            modifier = Modifier.size(28.dp)
-                        )
-                    }
-
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            text = "$targetReps",
-                            color = Color.White,
-                            fontSize = 32.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "REPS",
-                            color = Color.Gray,
-                            fontSize = 14.sp
-                        )
-                    }
-
-                    IconButton(
-                        onClick = { onTargetRepsChange(targetReps + 1) },
-                        enabled = targetReps < 20
-                    ) {
-                        Icon(
-                            Icons.Default.Add,
-                            contentDescription = "Increase reps",
-                            tint = Color.White,
-                            modifier = Modifier.size(28.dp)
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-// Display Options Section
-@Composable
-private fun DisplayOptionsSection(
-    showFormCues: Boolean,
-    showTempo: Boolean,
-    onToggleFormCues: () -> Unit,
-    onToggleTempo: () -> Unit
-) {
-    Column(
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        SectionHeader(
-            title = "DISPLAY OPTIONS",
-            icon = Icons.Default.Visibility
-        )
-
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = Color.Gray.copy(alpha = 0.2f)
-            ),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                // Form Cues Toggle
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onToggleFormCues() },
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.Info,
-                            contentDescription = "Form Cues",
-                            tint = Color.White,
-                            modifier = Modifier.size(24.dp)
-                        )
-                        Column {
-                            Text(
-                                text = "Form Cues",
-                                color = Color.White,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Medium
-                            )
-                            Text(
-                                text = "Show technique reminders",
-                                color = Color.Gray,
-                                fontSize = 14.sp
-                            )
-                        }
-                    }
-                    Switch(
-                        checked = showFormCues,
-                        onCheckedChange = { onToggleFormCues() },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = Color.Green,
-                            checkedTrackColor = Color.Green.copy(alpha = 0.5f)
-                        )
-                    )
-                }
-
-                // Tempo Display Toggle
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onToggleTempo() },
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.Speed,
-                            contentDescription = "Tempo Display",
-                            tint = Color.White,
-                            modifier = Modifier.size(24.dp)
-                        )
-                        Column {
-                            Text(
-                                text = "Tempo Display",
-                                color = Color.White,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Medium
-                            )
-                            Text(
-                                text = "Show timing indicators",
-                                color = Color.Gray,
-                                fontSize = 14.sp
-                            )
-                        }
-                    }
-                    Switch(
-                        checked = showTempo,
-                        onCheckedChange = { onToggleTempo() },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = Color.Blue,
-                            checkedTrackColor = Color.Blue.copy(alpha = 0.5f)
-                        )
-                    )
-                }
-            }
-        }
-    }
-}
-
-// Action Buttons Section
-@Composable
-private fun ActionButtonsSection(
-    onCapturePhoto: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    Column(
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        SectionHeader(
-            title = "ACTIONS",
-            icon = Icons.Default.CameraAlt
-        )
-
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Button(
-                onClick = onCapturePhoto,
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color.Blue
-                )
-            ) {
-                Icon(
-                    Icons.Default.CameraAlt,
-                    contentDescription = "Capture",
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "CAPTURE",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            Button(
-                onClick = onDismiss,
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color.Gray
-                )
-            ) {
-                Icon(
-                    Icons.Default.Close,
-                    contentDescription = "Close",
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "CLOSE",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
+            Icon(
+                Icons.Default.Timer,
+                contentDescription = "Rest Timer",
+                tint = Color(0xFFFF8C00), // Orange
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = "REST: ${formatTime(restTime)}",
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium
+            )
         }
     }
 }
+
+// Utility function for time formatting
+private fun formatTime(seconds: Int): String {
+    val minutes = seconds / 60
+    val remainingSeconds = seconds % 60
+    return "%d:%02d".format(minutes, remainingSeconds)
+}
+
+// Include the remaining helper functions from the original PowerliftingScreen
+// (VoiceCommandSettingsSection, VoiceCoachSettingsSection, etc.)
+// These would be copied from the original file as they are unchanged

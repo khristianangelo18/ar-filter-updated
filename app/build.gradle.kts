@@ -86,6 +86,13 @@ dependencies {
     // Navigation
     implementation(libs.androidx.navigation.compose)
 
+    // TensorFlow Lite for Barbell Detection (NEW)
+    implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+
+    // Coroutines for background processing (NEW)
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
     // Testing
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
