@@ -3,7 +3,6 @@ package com.example.arfilter.ui.screens
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import android.util.Log
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -11,12 +10,14 @@ import androidx.camera.view.PreviewView
 import androidx.compose.animation.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -30,8 +31,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -57,9 +56,7 @@ import com.example.arfilter.detector.BitmapUtils
 import com.example.arfilter.detector.Detection
 import com.example.arfilter.detector.BarPathAnalyzer
 import com.example.arfilter.detector.AutomaticPathManager
-import com.example.arfilter.detector.PathPoint
 import com.example.arfilter.detector.BarPath
-import com.example.arfilter.detector.MovementDirection
 import com.example.arfilter.detector.MovementAnalysis
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -101,7 +98,7 @@ fun PowerliftingScreen(
         try {
             YOLOv11ObjectDetector(
                 context = context,
-                modelPath = "optimizefloat16.tflite", // Your YOLOv11 model
+                modelPath = "bestmodelfloat16.tflite", // Your YOLOv11 model
                 confThreshold = 0.3f,
                 iouThreshold = 0.45f
             )
@@ -419,7 +416,7 @@ fun PowerliftingScreen(
         )
 
         // Quick Stats Panel (Top Left) - Enhanced with barbell detection info
-        EnhancedStatsPanel(
+        ModernStatsPanel(
             state = state,
             barbellDetections = barbellDetections,
             totalBarbellReps = totalBarbellReps,
@@ -475,35 +472,7 @@ fun PowerliftingScreen(
             }
         }
 
-        // Tempo Indicator (Bottom Left)
-        if (state.showTempo) {
-            Card(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(start = 16.dp, bottom = 140.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = Color.Black.copy(alpha = 0.8f)
-                ),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text(
-                        text = state.tempo.displayName,
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "${state.tempo.eccentric.toInt()}/${state.tempo.pause.toInt()}/${state.tempo.concentric.toInt()}",
-                        color = Color.Green,
-                        fontSize = 10.sp
-                    )
-                }
-            }
-        }
+
 
         // Enhanced Quick Action Buttons
         EnhancedQuickActionButtons(
@@ -644,7 +613,7 @@ fun PowerliftingScreen(
 
 // Enhanced Stats Panel with Barbell Detection Info
 @Composable
-private fun EnhancedStatsPanel(
+private fun ModernStatsPanel(
     state: PowerliftingState,
     barbellDetections: List<Detection>,
     totalBarbellReps: Int,
@@ -652,39 +621,91 @@ private fun EnhancedStatsPanel(
     showBarbellTracking: Boolean,
     modifier: Modifier = Modifier
 ) {
+    // Simple, subtle background based on state
+    val backgroundColor = when {
+        state.isActive && !state.isPaused -> Color(0xFF1A1A2E).copy(alpha = 0.92f) // Slightly blue-tinted dark
+        state.isPaused -> Color(0xFF2D1B1A).copy(alpha = 0.92f) // Slightly red-tinted dark
+        state.restTime > 0 -> Color(0xFF1A2D2E).copy(alpha = 0.92f) // Slightly cyan-tinted dark
+        else -> Color.Black.copy(alpha = 0.88f) // Default dark
+    }
+
+    // Subtle accent border for active states only
+    val borderColor = when {
+        state.isActive && !state.isPaused -> when (state.currentPhase) {
+            LiftPhase.ECCENTRIC -> Color.Red.copy(alpha = 0.3f)
+            LiftPhase.BOTTOM -> Color.Yellow.copy(alpha = 0.3f)
+            LiftPhase.CONCENTRIC -> Color.Green.copy(alpha = 0.3f)
+            LiftPhase.TOP -> Color.Blue.copy(alpha = 0.3f)
+            else -> Color.White.copy(alpha = 0.1f)
+        }
+        else -> Color.Transparent
+    }
+
     Card(
         modifier = modifier,
-        colors = CardDefaults.cardColors(
-            containerColor = Color.Black.copy(alpha = 0.85f)
-        ),
-        shape = RoundedCornerShape(12.dp)
+        colors = CardDefaults.cardColors(containerColor = backgroundColor),
+        shape = RoundedCornerShape(16.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier
+                .then(
+                    if (borderColor != Color.Transparent) {
+                        Modifier.border(
+                            width = 1.dp,
+                            color = borderColor,
+                            shape = RoundedCornerShape(16.dp)
+                        )
+                    } else Modifier
+                )
+                .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Exercise Header
+            // Header Section
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
-                    Text(
-                        text = state.selectedExercise.displayName,
-                        color = Color.White,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = state.tempo.displayName,
-                        color = Color.Gray,
-                        fontSize = 12.sp
-                    )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // Simple icon with subtle background
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(
+                                Color.White.copy(alpha = 0.1f),
+                                CircleShape
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = getExerciseIcon(state.selectedExercise),
+                            contentDescription = state.selectedExercise.displayName,
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    Column {
+                        Text(
+                            text = state.selectedExercise.displayName,
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = state.tempo.displayName,
+                            color = Color.Gray,
+                            fontSize = 12.sp
+                        )
+                    }
                 }
 
-                // Status Indicator
-                StatusIndicator(
+                // Clean status indicator
+                CleanStatusIndicator(
                     isActive = state.isActive,
                     isPaused = state.isPaused,
                     currentPhase = state.currentPhase
@@ -696,13 +717,13 @@ private fun EnhancedStatsPanel(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
-                StatItem(
+                CleanStatItem(
                     label = "SET",
                     value = "${state.setCount + 1}",
                     icon = Icons.Default.Layers,
                     color = Color.Blue
                 )
-                StatItem(
+                CleanStatItem(
                     label = "REP",
                     value = "${state.repCount}/${state.targetReps}",
                     icon = Icons.Default.Repeat,
@@ -710,53 +731,219 @@ private fun EnhancedStatsPanel(
                 )
             }
 
-            // Barbell Detection Info (when enabled)
+            // Barbell Detection (simplified)
             if (showBarbellTracking) {
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Color.Cyan.copy(alpha = 0.1f),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .padding(8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "BARBELL DETECTION",
-                        color = Color.Cyan,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Text(
-                            text = "FPS: ${String.format("%.1f", detectionFps)}",
-                            color = Color.Gray,
-                            fontSize = 9.sp
+                        Icon(
+                            Icons.Default.TrackChanges,
+                            contentDescription = "AI Detection",
+                            tint = Color.Cyan,
+                            modifier = Modifier.size(14.dp)
                         )
                         Text(
-                            text = "Detected: ${barbellDetections.size}",
-                            color = if (barbellDetections.isNotEmpty()) Color.Green else Color.Gray,
-                            fontSize = 9.sp
+                            text = "AI TRACKING",
+                            color = Color.Cyan,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
                         )
                     }
 
                     if (totalBarbellReps > 0) {
                         Text(
-                            text = "Auto Reps: $totalBarbellReps",
+                            text = "Auto: $totalBarbellReps",
                             color = Color.Cyan,
-                            fontSize = 9.sp
+                            fontSize = 10.sp
                         )
                     }
                 }
             }
 
-            // Rest Timer (if active)
+            // Rest Timer (when active)
             if (state.restTime > 0) {
-                RestTimeIndicator(restTime = state.restTime)
+                CleanRestTimer(restTime = state.restTime)
             }
         }
     }
 }
 
+@Composable
+private fun CleanStatusIndicator(
+    isActive: Boolean,
+    isPaused: Boolean,
+    currentPhase: LiftPhase
+) {
+    val (color, text) = when {
+        !isActive -> Pair(Color.Gray, "READY")
+        isPaused -> Pair(Color(0xFFFF8C00), "PAUSED")
+        else -> when (currentPhase) {
+            LiftPhase.READY -> Pair(Color.White, "READY")
+            LiftPhase.ECCENTRIC -> Pair(Color.Red, "DOWN")
+            LiftPhase.BOTTOM -> Pair(Color.Yellow, "HOLD")
+            LiftPhase.CONCENTRIC -> Pair(Color.Green, "UP")
+            LiftPhase.TOP -> Pair(Color.Blue, "TOP")
+            LiftPhase.REST -> Pair(Color(0xFFFF8C00), "REST")
+        }
+    }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(6.dp)
+                .background(color, CircleShape)
+        )
+        Text(
+            text = text,
+            color = color,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
+@Composable
+private fun CleanStatItem(
+    label: String,
+    value: String,
+    icon: ImageVector,
+    color: Color
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Icon(
+            icon,
+            contentDescription = label,
+            tint = color,
+            modifier = Modifier.size(16.dp)
+        )
+        Text(
+            text = label,
+            color = Color.Gray,
+            fontSize = 10.sp
+        )
+        Text(
+            text = value,
+            color = Color.White,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+private fun CleanRestTimer(restTime: Int) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                Color(0xFFFF8C00).copy(alpha = 0.15f),
+                RoundedCornerShape(8.dp)
+            )
+            .padding(10.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            Icons.Default.Timer,
+            contentDescription = "Rest Timer",
+            tint = Color(0xFFFF8C00),
+            modifier = Modifier.size(16.dp)
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = "REST: ${formatTime(restTime)}",
+            color = Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
+@Composable
+private fun TempoNumber(
+    value: String,
+    isActive: Boolean,
+    color: Color
+) {
+    Text(
+        text = value,
+        color = if (isActive) color else Color.Gray,
+        fontSize = 14.sp,
+        fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal
+    )
+}
+
+@Composable
+fun CleanRepCounter(
+    setCount: Int,
+    repCount: Int,
+    targetReps: Int,
+    totalBarbellReps: Int,
+    showBarbellTracking: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(
+            containerColor = Color.Black.copy(alpha = 0.85f)
+        ),
+        shape = RoundedCornerShape(12.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "SET ${setCount + 1}",
+                color = Color.Gray,
+                fontSize = 10.sp
+            )
+            Text(
+                text = "$repCount/$targetReps",
+                color = Color.White,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = "REPS",
+                color = Color.Gray,
+                fontSize = 10.sp
+            )
+
+            if (showBarbellTracking && totalBarbellReps > 0) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "AI: $totalBarbellReps",
+                    color = Color.Cyan,
+                    fontSize = 8.sp
+                )
+            }
+        }
+    }
+}
+
+
 // Enhanced Quick Action Buttons with Barbell Detection Toggle
+
 @Composable
 private fun EnhancedQuickActionButtons(
     state: PowerliftingState,
@@ -775,108 +962,235 @@ private fun EnhancedQuickActionButtons(
     onToggleControls: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Row(
+    Column(
         modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        // Row 1: Primary workout controls (most important)
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Stop Button
+            FloatingActionButton(
+                onClick = onStop,
+                modifier = Modifier.size(52.dp),
+                containerColor = if (state.isActive) Color.Red else Color.Red.copy(alpha = 0.5f),
+                elevation = FloatingActionButtonDefaults.elevation(
+                    defaultElevation = 6.dp,
+                    pressedElevation = 8.dp
+                )
+            ) {
+                Icon(
+                    Icons.Default.Stop,
+                    contentDescription = "Stop Session",
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+
+            // CENTRAL PLAY/PAUSE BUTTON (PROMINENT)
+            FloatingActionButton(
+                onClick = onStartPause,
+                modifier = Modifier.size(72.dp), // Largest button
+                containerColor = if (state.isActive && !state.isPaused) Color(0xFFFF8C00) else Color.Green,
+                elevation = FloatingActionButtonDefaults.elevation(
+                    defaultElevation = 12.dp,
+                    pressedElevation = 16.dp
+                )
+            ) {
+                Icon(
+                    imageVector = if (state.isActive && !state.isPaused) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = if (state.isActive && !state.isPaused) "Pause" else "Start",
+                    tint = Color.White,
+                    modifier = Modifier.size(36.dp) // Larger icon for prominence
+                )
+            }
+
+            // Complete Set Button (when active)
+            if (state.isActive && !state.isPaused) {
+                FloatingActionButton(
+                    onClick = onCompleteSet,
+                    modifier = Modifier.size(52.dp),
+                    containerColor = Color(0xFF4CAF50),
+                    elevation = FloatingActionButtonDefaults.elevation(
+                        defaultElevation = 6.dp,
+                        pressedElevation = 8.dp
+                    )
+                ) {
+                    Icon(
+                        Icons.Default.Check,
+                        contentDescription = "Complete Set",
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            } else {
+                // Settings/Controls Toggle when not actively working out
+                FloatingActionButton(
+                    onClick = onToggleControls,
+                    modifier = Modifier.size(52.dp),
+                    containerColor = Color.Black.copy(alpha = 0.7f),
+                    elevation = FloatingActionButtonDefaults.elevation(
+                        defaultElevation = 6.dp,
+                        pressedElevation = 8.dp
+                    )
+                ) {
+                    Icon(
+                        Icons.Default.Settings,
+                        contentDescription = "Controls",
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
+        }
+
+        // Row 2: Secondary controls with grouped functionality
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = Color.Black.copy(alpha = 0.8f)
+            ),
+            shape = RoundedCornerShape(24.dp)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Voice Controls Group
+                VoiceControlsGroup(
+                    voiceEnabled = voiceEnabled,
+                    voiceCommandsEnabled = voiceCommandsEnabled,
+                    isListening = isListening,
+                    onToggleVoice = onToggleVoice,
+                    onToggleVoiceCommands = onToggleVoiceCommands
+                )
+
+                // Divider
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(32.dp)
+                        .background(Color.Gray.copy(alpha = 0.5f))
+                )
+
+                // Detection and Camera Group
+                DetectionCameraGroup(
+                    showBarbellTracking = showBarbellTracking,
+                    onToggleBarbellTracking = onToggleBarbellTracking,
+                    onSwitchCamera = onSwitchCamera
+                )
+
+                // Divider
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(32.dp)
+                        .background(Color.Gray.copy(alpha = 0.5f))
+                )
+
+                // Settings Button
+                IconButton(
+                    onClick = onToggleControls,
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(
+                        Icons.Default.MoreVert,
+                        contentDescription = "More Settings",
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VoiceControlsGroup(
+    voiceEnabled: Boolean,
+    voiceCommandsEnabled: Boolean,
+    isListening: Boolean,
+    onToggleVoice: () -> Unit,
+    onToggleVoiceCommands: () -> Unit
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // 1. Settings/Controls Toggle
-        FloatingActionButton(
-            onClick = onToggleControls,
-            modifier = Modifier.size(44.dp),
-            containerColor = Color.Black.copy(alpha = 0.7f)
-        ) {
-            Icon(
-                Icons.Default.Settings,
-                contentDescription = "Controls",
-                tint = Color.White,
-                modifier = Modifier.size(20.dp)
-            )
-        }
-
-        // 2. Barbell Detection Toggle
-        FloatingActionButton(
-            onClick = onToggleBarbellTracking,
-            modifier = Modifier.size(44.dp),
-            containerColor = if (showBarbellTracking) Color(0xFF00BCD4) else Color.Gray
-        ) {
-            Icon(
-                imageVector = Icons.Default.TrackChanges,
-                contentDescription = "Toggle Barbell Detection",
-                tint = Color.White,
-                modifier = Modifier.size(20.dp)
-            )
-        }
-
-        // 3. Voice Commands Toggle Button
-        FloatingActionButton(
-            onClick = onToggleVoiceCommands,
-            modifier = Modifier.size(44.dp),
-            containerColor = if (voiceCommandsEnabled) {
-                if (isListening) Color.Red else Color(0xFF4CAF50)
-            } else Color.Gray
-        ) {
-            Icon(
-                imageVector = if (voiceCommandsEnabled) {
-                    if (isListening) Icons.Default.MicOff else Icons.Default.Mic
-                } else Icons.Default.MicOff,
-                contentDescription = "Toggle Voice Commands",
-                tint = Color.White,
-                modifier = Modifier.size(20.dp)
-            )
-        }
-
-        // 4. Voice Coach Toggle Button
-        FloatingActionButton(
+        // Voice Coach Toggle
+        IconButton(
             onClick = onToggleVoice,
-            modifier = Modifier.size(44.dp),
-            containerColor = if (voiceEnabled) Color(0xFF4CAF50) else Color.Gray
+            modifier = Modifier.size(40.dp)
         ) {
             Icon(
                 imageVector = if (voiceEnabled) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
                 contentDescription = "Toggle Voice Coach",
-                tint = Color.White,
+                tint = if (voiceEnabled) Color.Green else Color.Gray,
                 modifier = Modifier.size(20.dp)
             )
         }
 
-        // 5. Start/Pause Button (CENTRAL PLAY BUTTON - PROMINENT)
-        FloatingActionButton(
-            onClick = onStartPause,
-            modifier = Modifier.size(68.dp), // Made larger for prominence
-            containerColor = if (state.isActive && !state.isPaused) Color(0xFFFF8C00) else Color.Green,
-            elevation = FloatingActionButtonDefaults.elevation(
-                defaultElevation = 8.dp,
-                pressedElevation = 12.dp
-            )
-        ) {
-            Icon(
-                imageVector = if (state.isActive && !state.isPaused) Icons.Default.Pause else Icons.Default.PlayArrow,
-                contentDescription = if (state.isActive && !state.isPaused) "Pause" else "Start",
-                tint = Color.White,
-                modifier = Modifier.size(32.dp) // Larger icon for central button
-            )
-        }
+        // Voice Commands Toggle with status indicator
+        Box {
+            IconButton(
+                onClick = onToggleVoiceCommands,
+                modifier = Modifier.size(40.dp)
+            ) {
+                Icon(
+                    imageVector = if (voiceCommandsEnabled) {
+                        if (isListening) Icons.Default.Mic else Icons.Default.MicOff
+                    } else Icons.Default.MicOff,
+                    contentDescription = "Toggle Voice Commands",
+                    tint = if (voiceCommandsEnabled) {
+                        if (isListening) Color.Red else Color(0xFF4CAF50)
+                    } else Color.Gray,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
 
-        // 6. Stop Button
-        FloatingActionButton(
-            onClick = onStop,
-            modifier = Modifier.size(44.dp),
-            containerColor = if (state.isActive) Color.Red else Color.Red.copy(alpha = 0.5f)
+            // Listening indicator
+            if (isListening) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .background(Color.Red, CircleShape)
+                        .align(Alignment.TopEnd)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DetectionCameraGroup(
+    showBarbellTracking: Boolean,
+    onToggleBarbellTracking: () -> Unit,
+    onSwitchCamera: () -> Unit
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Barbell Detection Toggle
+        IconButton(
+            onClick = onToggleBarbellTracking,
+            modifier = Modifier.size(40.dp)
         ) {
             Icon(
-                Icons.Default.Stop,
-                contentDescription = "Stop Session",
-                tint = Color.White,
+                imageVector = Icons.Default.TrackChanges,
+                contentDescription = "Toggle Barbell Detection",
+                tint = if (showBarbellTracking) Color(0xFF00BCD4) else Color.Gray,
                 modifier = Modifier.size(20.dp)
             )
         }
 
-        // 7. Camera Switch
-        FloatingActionButton(
+        // Camera Switch
+        IconButton(
             onClick = onSwitchCamera,
-            modifier = Modifier.size(44.dp),
-            containerColor = Color.Black.copy(alpha = 0.7f)
+            modifier = Modifier.size(40.dp)
         ) {
             Icon(
                 Icons.Default.FlipCameraAndroid,
@@ -885,20 +1199,157 @@ private fun EnhancedQuickActionButtons(
                 modifier = Modifier.size(20.dp)
             )
         }
+    }
+}
 
-        // Complete Set Button (appears as overlay when needed)
-        if (state.isActive && !state.isPaused) {
-            FloatingActionButton(
-                onClick = onCompleteSet,
-                modifier = Modifier.size(36.dp),
-                containerColor = Color(0xFF4CAF50)
+// Enhanced Quick Status Bar that appears at the top during workout
+@Composable
+fun WorkoutStatusBar(
+    state: PowerliftingState,
+    modifier: Modifier = Modifier
+) {
+    AnimatedVisibility(
+        visible = state.isActive,
+        enter = slideInVertically { -it } + fadeIn(),
+        exit = slideOutVertically { -it } + fadeOut(),
+        modifier = modifier
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = Color.Black.copy(alpha = 0.85f)
+            ),
+            shape = RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                // Exercise and Tempo
+                Column {
+                    Text(
+                        text = state.selectedExercise.displayName,
+                        color = Color.White,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "${state.tempo.displayName} (${state.tempo.eccentric.toInt()}/${state.tempo.pause.toInt()}/${state.tempo.concentric.toInt()})",
+                        color = Color.Gray,
+                        fontSize = 12.sp
+                    )
+                }
+
+                // Current Progress
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Set indicator
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "SET",
+                            color = Color.Gray,
+                            fontSize = 10.sp
+                        )
+                        Text(
+                            text = "${state.setCount + 1}",
+                            color = Color.White,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    // Rep indicator
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "REPS",
+                            color = Color.Gray,
+                            fontSize = 10.sp
+                        )
+                        Text(
+                            text = "${state.repCount}/${state.targetReps}",
+                            color = Color.White,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                // Status indicator
+                StatusIndicator(
+                    isActive = state.isActive,
+                    isPaused = state.isPaused,
+                    currentPhase = state.currentPhase
+                )
+            }
+        }
+    }
+}
+
+// Compact floating info panel for when controls are hidden
+@Composable
+fun CompactInfoPanel(
+    state: PowerliftingState,
+    voiceEnabled: Boolean,
+    showBarbellTracking: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(
+            containerColor = Color.Black.copy(alpha = 0.7f)
+        ),
+        shape = RoundedCornerShape(20.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Active status indicators
+            if (voiceEnabled) {
                 Icon(
-                    Icons.Default.Check,
-                    contentDescription = "Complete Set",
-                    tint = Color.White,
+                    Icons.Default.VolumeUp,
+                    contentDescription = "Voice Active",
+                    tint = Color.Green,
                     modifier = Modifier.size(16.dp)
                 )
+            }
+
+            if (showBarbellTracking) {
+                Icon(
+                    Icons.Default.TrackChanges,
+                    contentDescription = "Detection Active",
+                    tint = Color.Cyan,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+
+            // Rest timer if active
+            if (state.restTime > 0) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Timer,
+                        contentDescription = "Rest Timer",
+                        tint = Color.Red,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = formatTime(state.restTime),
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
         }
     }
