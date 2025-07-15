@@ -19,7 +19,7 @@ import kotlin.math.min
  */
 class YOLOv11ObjectDetector(
     context: Context,
-    modelPath: String = "bestmodelfloat16.tflite",
+    modelPath: String = "optimizefloat16.tflite",
     private val inputSize: Int = 640,
     private val confThreshold: Float = 0.3f,
     private val iouThreshold: Float = 0.45f,

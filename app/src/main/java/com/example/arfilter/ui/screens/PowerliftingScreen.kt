@@ -1,5 +1,6 @@
 package com.example.arfilter.ui.screens
 
+
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
@@ -55,9 +56,11 @@ import com.example.arfilter.detector.YOLOv11ObjectDetector
 import com.example.arfilter.detector.BitmapUtils
 import com.example.arfilter.detector.Detection
 import com.example.arfilter.detector.BarPathAnalyzer
-import com.example.arfilter.detector.AutomaticPathManager
+import com.example.arfilter.detector.EnhancedPathManager
 import com.example.arfilter.detector.BarPath
 import com.example.arfilter.detector.MovementAnalysis
+import com.example.arfilter.detector.SessionStats
+import com.example.arfilter.utils.CsvReportManager
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
@@ -87,8 +90,14 @@ fun PowerliftingScreen(
     var detectionFps by remember { mutableStateOf(0f) }
     var showBarbellTracking by remember { mutableStateOf(false) } // Toggle for background detection
 
-    // Bar Path Tracking States
-    val pathManager = remember { AutomaticPathManager() }
+    // Enhanced Bar Path Tracking States with CSV Report Manager
+    val enhancedPathManager = remember { EnhancedPathManager() }
+    val csvReportManager = remember { CsvReportManager(context) }
+
+    var sessionStats by remember { mutableStateOf(SessionStats(0, 0f, 0f)) }
+    var isGeneratingReport by remember { mutableStateOf(false) }
+    var lastReportPath by remember { mutableStateOf<String?>(null) }
+
     var barPaths by remember { mutableStateOf<List<BarPath>>(emptyList()) }
     var pathAnalysis by remember { mutableStateOf<MovementAnalysis?>(null) }
     var totalBarbellReps by remember { mutableStateOf(0) }
@@ -98,7 +107,7 @@ fun PowerliftingScreen(
         try {
             YOLOv11ObjectDetector(
                 context = context,
-                modelPath = "bestmodelfloat16.tflite", // Your YOLOv11 model
+                modelPath = "optimizefloat16.tflite", // Your YOLOv11 model
                 confThreshold = 0.3f,
                 iouThreshold = 0.45f
             )
@@ -184,6 +193,44 @@ fun PowerliftingScreen(
     var previousRepCount by remember { mutableStateOf(0) }
     var previousSetCount by remember { mutableStateOf(0) }
     var previousRestTime by remember { mutableStateOf(0) }
+
+    // Session management functions
+    fun startRepSession() {
+        enhancedPathManager.startSession()
+        sessionStats = SessionStats(0, 0f, 0f)
+        lastReportPath = null
+        Log.d("RepSession", "Started new rep tracking session")
+    }
+
+    fun generateRepReport() {
+        scope.launch {
+            isGeneratingReport = true
+            try {
+                val reportPath = enhancedPathManager.generateReport(
+                    csvManager = csvReportManager,
+                    exercise = state.selectedExercise.displayName,
+                    tempo = state.tempo.displayName
+                )
+
+                if (reportPath != null) {
+                    lastReportPath = reportPath
+                    // Automatically share the report
+                    val shareSuccess = csvReportManager.shareReport(reportPath)
+                    if (shareSuccess) {
+                        Log.d("RepReport", "Report generated and shared: $reportPath")
+                    } else {
+                        Log.e("RepReport", "Failed to share report")
+                    }
+                } else {
+                    Log.d("RepReport", "No reps to report")
+                }
+            } catch (e: Exception) {
+                Log.e("RepReport", "Failed to generate report", e)
+            } finally {
+                isGeneratingReport = false
+            }
+        }
+    }
 
     // Initialize voice coach and voice commands
     LaunchedEffect(Unit) {
@@ -308,23 +355,22 @@ fun PowerliftingScreen(
 
                                         // Process bar path tracking if detections exist
                                         if (detections.isNotEmpty()) {
-                                            val updatedPaths = pathManager.addDetection(detections.first(), currentTime)
+                                            val updatedPaths = enhancedPathManager.addDetection(detections.first(), currentTime)
                                             barPaths = updatedPaths
+
+                                            // Update session stats
+                                            sessionStats = enhancedPathManager.getSessionStats()
 
                                             // Analyze movement if we have active paths
                                             if (updatedPaths.isNotEmpty()) {
                                                 val activePath = updatedPaths.last()
                                                 if (activePath.points.size > 10) {
                                                     pathAnalysis = pathAnalyzer.analyzeMovement(activePath.points)
-
-                                                    // Count total reps across all paths
-                                                    totalBarbellReps = updatedPaths.sumOf { path ->
-                                                        if (path.points.size > 20) {
-                                                            pathAnalyzer.analyzeMovement(path.points)?.repCount ?: 0
-                                                        } else 0
-                                                    }
                                                 }
                                             }
+
+                                            // Update total reps from completed reps
+                                            totalBarbellReps = enhancedPathManager.getCompletedReps().size
                                         }
 
                                         // Calculate detection FPS
@@ -422,6 +468,7 @@ fun PowerliftingScreen(
             totalBarbellReps = totalBarbellReps,
             detectionFps = detectionFps,
             showBarbellTracking = showBarbellTracking,
+            sessionStats = sessionStats, // Added this parameter
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .padding(start = 16.dp, top = 60.dp)
@@ -472,8 +519,6 @@ fun PowerliftingScreen(
             }
         }
 
-
-
         // Enhanced Quick Action Buttons
         EnhancedQuickActionButtons(
             state = state,
@@ -509,8 +554,8 @@ fun PowerliftingScreen(
                 previousSetCount = 0
                 previousRestTime = 0
 
-                // Clear bar paths
-                pathManager.clearAllPaths()
+                // Clear bar paths using correct manager
+                enhancedPathManager.clearAllPaths()
                 barPaths = emptyList()
                 totalBarbellReps = 0
             },
@@ -528,12 +573,22 @@ fun PowerliftingScreen(
                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
             },
             onToggleBarbellTracking = {
+                if (showBarbellTracking) {
+                    // Turning OFF - generate report if we have completed reps
+                    if (enhancedPathManager.getCompletedReps().isNotEmpty()) {
+                        generateRepReport()
+                    }
+                } else {
+                    // Turning ON - start new session
+                    startRepSession()
+                }
+
                 showBarbellTracking = !showBarbellTracking
                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
 
                 // Clear paths when disabling
                 if (!showBarbellTracking) {
-                    pathManager.clearAllPaths()
+                    enhancedPathManager.clearAllPaths()
                     barPaths = emptyList()
                     barbellDetections = emptyList()
                     totalBarbellReps = 0
@@ -569,20 +624,35 @@ fun PowerliftingScreen(
                 voiceCoach = voiceCoach,
                 voiceCommandManager = voiceCommandManager,
                 showBarbellTracking = showBarbellTracking,
+                sessionStats = sessionStats,
+                isGeneratingReport = isGeneratingReport,
+                lastReportPath = lastReportPath,
                 onToggleBarbellTracking = {
+                    if (showBarbellTracking) {
+                        // Turning OFF - generate report if we have completed reps
+                        if (enhancedPathManager.getCompletedReps().isNotEmpty()) {
+                            generateRepReport()
+                        }
+                    } else {
+                        // Turning ON - start new session
+                        startRepSession()
+                    }
+
                     showBarbellTracking = !showBarbellTracking
+
                     if (!showBarbellTracking) {
-                        pathManager.clearAllPaths()
+                        enhancedPathManager.clearAllPaths()
                         barPaths = emptyList()
                         barbellDetections = emptyList()
                         totalBarbellReps = 0
                     }
                 },
                 onClearBarPaths = {
-                    pathManager.clearAllPaths()
+                    enhancedPathManager.clearAllPaths()
                     barPaths = emptyList()
                     barbellDetections = emptyList()
                     totalBarbellReps = 0
+                    sessionStats = SessionStats(0, 0f, 0f)
                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                 },
                 onCapturePhoto = {
@@ -611,7 +681,7 @@ fun PowerliftingScreen(
     }
 }
 
-// Enhanced Stats Panel with Barbell Detection Info
+// Enhanced Stats Panel with Barbell Detection Info and Session Stats
 @Composable
 private fun ModernStatsPanel(
     state: PowerliftingState,
@@ -619,6 +689,7 @@ private fun ModernStatsPanel(
     totalBarbellReps: Int,
     detectionFps: Float,
     showBarbellTracking: Boolean,
+    sessionStats: SessionStats, // Added parameter
     modifier: Modifier = Modifier
 ) {
     // Simple, subtle background based on state
@@ -731,43 +802,64 @@ private fun ModernStatsPanel(
                 )
             }
 
-            // Barbell Detection (simplified)
+            // Barbell Detection with Session Stats
             if (showBarbellTracking) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(
-                            Color.Cyan.copy(alpha = 0.1f),
-                            RoundedCornerShape(8.dp)
-                        )
-                        .padding(8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                Color.Cyan.copy(alpha = 0.1f),
+                                RoundedCornerShape(8.dp)
+                            )
+                            .padding(8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            Icons.Default.TrackChanges,
-                            contentDescription = "AI Detection",
-                            tint = Color.Cyan,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Text(
-                            text = "AI TRACKING",
-                            color = Color.Cyan,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.TrackChanges,
+                                contentDescription = "AI Detection",
+                                tint = Color.Cyan,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = "AI TRACKING",
+                                color = Color.Cyan,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
 
-                    if (totalBarbellReps > 0) {
                         Text(
-                            text = "Auto: $totalBarbellReps",
+                            text = "Reps: ${sessionStats.totalReps}",
                             color = Color.Cyan,
                             fontSize = 10.sp
                         )
+                    }
+
+                    // Session quality indicator
+                    if (sessionStats.totalReps > 0) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Avg Quality: ${String.format("%.0f", sessionStats.averageQuality)}%",
+                                color = Color.Gray,
+                                fontSize = 9.sp
+                            )
+                            Text(
+                                text = "Session: ${String.format("%.1f", sessionStats.sessionDuration / 60f)}min",
+                                color = Color.Gray,
+                                fontSize = 9.sp
+                            )
+                        }
                     }
                 }
             }
@@ -877,73 +969,7 @@ private fun CleanRestTimer(restTime: Int) {
     }
 }
 
-@Composable
-private fun TempoNumber(
-    value: String,
-    isActive: Boolean,
-    color: Color
-) {
-    Text(
-        text = value,
-        color = if (isActive) color else Color.Gray,
-        fontSize = 14.sp,
-        fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal
-    )
-}
-
-@Composable
-fun CleanRepCounter(
-    setCount: Int,
-    repCount: Int,
-    targetReps: Int,
-    totalBarbellReps: Int,
-    showBarbellTracking: Boolean,
-    modifier: Modifier = Modifier
-) {
-    Card(
-        modifier = modifier,
-        colors = CardDefaults.cardColors(
-            containerColor = Color.Black.copy(alpha = 0.85f)
-        ),
-        shape = RoundedCornerShape(12.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                text = "SET ${setCount + 1}",
-                color = Color.Gray,
-                fontSize = 10.sp
-            )
-            Text(
-                text = "$repCount/$targetReps",
-                color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = "REPS",
-                color = Color.Gray,
-                fontSize = 10.sp
-            )
-
-            if (showBarbellTracking && totalBarbellReps > 0) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "AI: $totalBarbellReps",
-                    color = Color.Cyan,
-                    fontSize = 8.sp
-                )
-            }
-        }
-    }
-}
-
-
 // Enhanced Quick Action Buttons with Barbell Detection Toggle
-
 @Composable
 private fun EnhancedQuickActionButtons(
     state: PowerliftingState,
@@ -1202,159 +1228,6 @@ private fun DetectionCameraGroup(
     }
 }
 
-// Enhanced Quick Status Bar that appears at the top during workout
-@Composable
-fun WorkoutStatusBar(
-    state: PowerliftingState,
-    modifier: Modifier = Modifier
-) {
-    AnimatedVisibility(
-        visible = state.isActive,
-        enter = slideInVertically { -it } + fadeIn(),
-        exit = slideOutVertically { -it } + fadeOut(),
-        modifier = modifier
-    ) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = Color.Black.copy(alpha = 0.85f)
-            ),
-            shape = RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp)
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Exercise and Tempo
-                Column {
-                    Text(
-                        text = state.selectedExercise.displayName,
-                        color = Color.White,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "${state.tempo.displayName} (${state.tempo.eccentric.toInt()}/${state.tempo.pause.toInt()}/${state.tempo.concentric.toInt()})",
-                        color = Color.Gray,
-                        fontSize = 12.sp
-                    )
-                }
-
-                // Current Progress
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Set indicator
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = "SET",
-                            color = Color.Gray,
-                            fontSize = 10.sp
-                        )
-                        Text(
-                            text = "${state.setCount + 1}",
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-
-                    // Rep indicator
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = "REPS",
-                            color = Color.Gray,
-                            fontSize = 10.sp
-                        )
-                        Text(
-                            text = "${state.repCount}/${state.targetReps}",
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-
-                // Status indicator
-                StatusIndicator(
-                    isActive = state.isActive,
-                    isPaused = state.isPaused,
-                    currentPhase = state.currentPhase
-                )
-            }
-        }
-    }
-}
-
-// Compact floating info panel for when controls are hidden
-@Composable
-fun CompactInfoPanel(
-    state: PowerliftingState,
-    voiceEnabled: Boolean,
-    showBarbellTracking: Boolean,
-    modifier: Modifier = Modifier
-) {
-    Card(
-        modifier = modifier,
-        colors = CardDefaults.cardColors(
-            containerColor = Color.Black.copy(alpha = 0.7f)
-        ),
-        shape = RoundedCornerShape(20.dp)
-    ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Active status indicators
-            if (voiceEnabled) {
-                Icon(
-                    Icons.Default.VolumeUp,
-                    contentDescription = "Voice Active",
-                    tint = Color.Green,
-                    modifier = Modifier.size(16.dp)
-                )
-            }
-
-            if (showBarbellTracking) {
-                Icon(
-                    Icons.Default.TrackChanges,
-                    contentDescription = "Detection Active",
-                    tint = Color.Cyan,
-                    modifier = Modifier.size(16.dp)
-                )
-            }
-
-            // Rest timer if active
-            if (state.restTime > 0) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Icon(
-                        Icons.Default.Timer,
-                        contentDescription = "Rest Timer",
-                        tint = Color.Red,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Text(
-                        text = formatTime(state.restTime),
-                        color = Color.White,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-        }
-    }
-}
-
 // Enhanced Welcome Overlay with Barbell Detection Info
 @Composable
 private fun EnhancedWelcomeOverlay(
@@ -1411,7 +1284,7 @@ private fun EnhancedWelcomeOverlay(
                     InstructionItem("🔊 Voice Coach: Real-time form cues")
                     InstructionItem("🎤 Voice Commands: \"Start\", \"Stop\", \"Up\", \"Down\"")
                     InstructionItem("🎯 Barbell Detection: Automatic tracking (optional)")
-                    InstructionItem("📊 Bar Path: Real-time movement analysis")
+                    InstructionItem("📊 CSV Reports: Download rep analysis after session")
                     InstructionItem("👆 Tap: Hide/show controls")
                     InstructionItem("👆👆 Double tap: Switch camera")
                 }
@@ -1460,6 +1333,9 @@ fun EnhancedPowerliftingControlsPanel(
     voiceCoach: VoiceCoachManager,
     voiceCommandManager: VoiceCommandManager,
     showBarbellTracking: Boolean,
+    sessionStats: SessionStats, // Added parameter
+    isGeneratingReport: Boolean, // Added parameter
+    lastReportPath: String?, // Added parameter
     onToggleBarbellTracking: () -> Unit,
     onClearBarPaths: () -> Unit,
     onCapturePhoto: () -> Unit,
@@ -1510,11 +1386,14 @@ fun EnhancedPowerliftingControlsPanel(
                 }
             }
 
-            // Barbell Detection Settings Section (NEW)
+            // Enhanced Barbell Detection Settings Section with Session Stats
             BarbellDetectionSettingsSection(
                 showBarbellTracking = showBarbellTracking,
                 onToggleBarbellTracking = onToggleBarbellTracking,
-                onClearBarPaths = onClearBarPaths
+                onClearBarPaths = onClearBarPaths,
+                sessionStats = sessionStats,
+                isGeneratingReport = isGeneratingReport,
+                lastReportPath = lastReportPath
             )
 
             // Voice Command Settings Section
@@ -1575,16 +1454,19 @@ fun EnhancedPowerliftingControlsPanel(
     }
 }
 
-// NEW: Barbell Detection Settings Section
+// Enhanced Barbell Detection Settings Section with Session Stats and Report Generation
 @Composable
 private fun BarbellDetectionSettingsSection(
     showBarbellTracking: Boolean,
     onToggleBarbellTracking: () -> Unit,
-    onClearBarPaths: () -> Unit
+    onClearBarPaths: () -> Unit,
+    sessionStats: SessionStats, // Added parameter
+    isGeneratingReport: Boolean, // Added parameter
+    lastReportPath: String? // Added parameter
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SectionHeader(
-            title = "BARBELL DETECTION",
+            title = "AI REP TRACKING & REPORTS",
             icon = Icons.Default.TrackChanges
         )
 
@@ -1603,13 +1485,16 @@ private fun BarbellDetectionSettingsSection(
                 ) {
                     Column {
                         Text(
-                            text = "Background Detection",
+                            text = "AI Rep Tracking",
                             color = Color.White,
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Medium
                         )
                         Text(
-                            text = if (showBarbellTracking) "AI tracking active" else "Manual mode only",
+                            text = if (showBarbellTracking)
+                                "Recording reps for CSV report"
+                            else
+                                "Tap to start rep tracking",
                             color = if (showBarbellTracking) Color.Cyan else Color.Gray,
                             fontSize = 12.sp
                         )
@@ -1629,33 +1514,50 @@ private fun BarbellDetectionSettingsSection(
                 if (showBarbellTracking) {
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    Text(
-                        text = "Features:",
-                        color = Color.Gray,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-
-                    val features = listOf(
-                        "• Real-time barbell detection using YOLOv11",
-                        "• Automatic bar path tracking",
-                        "• Movement analysis and rep counting",
-                        "• Background processing (doesn't interfere with AR)",
-                        "• Cyan overlay shows detected barbells and paths"
-                    )
-
-                    features.forEach { feature ->
-                        Text(
-                            text = feature,
-                            color = Color.Gray,
-                            fontSize = 12.sp,
-                            modifier = Modifier.padding(start = 8.dp, top = 2.dp)
-                        )
+                    // Session stats
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text(
+                                text = "Session Stats",
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = "• Reps recorded: ${sessionStats.totalReps}",
+                                color = Color.Gray,
+                                fontSize = 12.sp
+                            )
+                            if (sessionStats.totalReps > 0) {
+                                Text(
+                                    text = "• Avg quality: ${String.format("%.0f", sessionStats.averageQuality)}%",
+                                    color = Color.Gray,
+                                    fontSize = 12.sp
+                                )
+                                Text(
+                                    text = "• Duration: ${String.format("%.1f", sessionStats.sessionDuration / 60f)} min",
+                                    color = Color.Gray,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    // Clear paths button
+                    Text(
+                        text = "📊 Turn OFF tracking to generate CSV report",
+                        color = Color.Cyan,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Clear button
                     Button(
                         onClick = onClearBarPaths,
                         modifier = Modifier.fillMaxWidth(),
@@ -1665,19 +1567,47 @@ private fun BarbellDetectionSettingsSection(
                     ) {
                         Icon(
                             Icons.Default.Clear,
-                            contentDescription = "Clear Paths",
+                            contentDescription = "Clear Session",
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Clear Bar Paths")
+                        Text("Clear Session Data")
                     }
+                }
+
+                // Report generation status
+                if (isGeneratingReport) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = Color.Cyan
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Generating report...",
+                            color = Color.Cyan,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+
+                // Last report info
+                lastReportPath?.let { path ->
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "✅ Report saved and shared",
+                        color = Color.Green,
+                        fontSize = 12.sp
+                    )
                 }
             }
         }
     }
 }
 
-// Drawing functions for barbell detection overlay
 private fun DrawScope.drawBarbellDetections(
     detections: List<Detection>,
     detector: YOLOv11ObjectDetector?
@@ -1713,9 +1643,6 @@ private fun DrawScope.drawBarbellDetections(
                 size = androidx.compose.ui.geometry.Size(right - left, bottom - top),
                 style = Stroke(width = 2.dp.toPx())
             )
-
-            // Draw label
-
         }
     }
 }
@@ -1776,7 +1703,7 @@ private fun DrawScope.drawBarPaths(paths: List<BarPath>) {
     }
 }
 
-// Helper components from the original PowerliftingScreen that need to be copied
+// Helper components
 @Composable
 private fun StatusIndicator(
     isActive: Boolean,
@@ -1805,7 +1732,7 @@ private fun StatusIndicator(
                 .size(8.dp)
                 .background(
                     color = color,
-                    shape = androidx.compose.foundation.shape.CircleShape
+                    shape = CircleShape
                 )
         )
         Text(
@@ -1817,37 +1744,6 @@ private fun StatusIndicator(
             color = Color.White,
             fontSize = 10.sp,
             fontWeight = FontWeight.Medium
-        )
-    }
-}
-
-@Composable
-private fun StatItem(
-    label: String,
-    value: String,
-    icon: ImageVector,
-    color: Color = Color.White
-) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        Icon(
-            icon,
-            contentDescription = label,
-            tint = color,
-            modifier = Modifier.size(16.dp)
-        )
-        Text(
-            text = label,
-            color = Color.Gray,
-            fontSize = 10.sp
-        )
-        Text(
-            text = value,
-            color = Color.White,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Bold
         )
     }
 }
@@ -2620,45 +2516,9 @@ private suspend fun capturePhoto(
     )
 }
 
-@Composable
-private fun RestTimeIndicator(restTime: Int) {
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = Color(0xFFFF8C00).copy(alpha = 0.2f) // Orange
-        ),
-        shape = RoundedCornerShape(6.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(8.dp),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                Icons.Default.Timer,
-                contentDescription = "Rest Timer",
-                tint = Color(0xFFFF8C00), // Orange
-                modifier = Modifier.size(16.dp)
-            )
-            Spacer(modifier = Modifier.width(4.dp))
-            Text(
-                text = "REST: ${formatTime(restTime)}",
-                color = Color.White,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium
-            )
-        }
-    }
-}
-
 // Utility function for time formatting
 private fun formatTime(seconds: Int): String {
     val minutes = seconds / 60
     val remainingSeconds = seconds % 60
     return "%d:%02d".format(minutes, remainingSeconds)
 }
-
-// Include the remaining helper functions from the original PowerliftingScreen
-// (VoiceCommandSettingsSection, VoiceCoachSettingsSection, etc.)
-// These would be copied from the original file as they are unchanged

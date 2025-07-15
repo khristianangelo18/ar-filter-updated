@@ -2,6 +2,7 @@ package com.example.arfilter
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -21,6 +22,7 @@ import com.example.arfilter.viewmodel.PowerliftingViewModel
 class ARFeature : ComponentActivity() {
     private var hasCameraPermission by mutableStateOf(false)
     private var hasMicrophonePermission by mutableStateOf(false)
+    private var hasStoragePermission by mutableStateOf(false)
     private var permissionsRequested by mutableStateOf(false)
 
     // Request multiple permissions launcher
@@ -29,6 +31,14 @@ class ARFeature : ComponentActivity() {
     ) { permissions ->
         hasCameraPermission = permissions[Manifest.permission.CAMERA] ?: false
         hasMicrophonePermission = permissions[Manifest.permission.RECORD_AUDIO] ?: false
+
+        // Check storage permission based on Android version
+        hasStoragePermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions[Manifest.permission.READ_MEDIA_IMAGES] ?: false
+        } else {
+            permissions[Manifest.permission.WRITE_EXTERNAL_STORAGE] ?: false
+        }
+
         permissionsRequested = true
     }
 
@@ -46,6 +56,19 @@ class ARFeature : ComponentActivity() {
             Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
 
+        // Check storage permission based on Android version
+        hasStoragePermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.READ_MEDIA_IMAGES
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE
+            ) == PackageManager.PERMISSION_GRANTED
+        }
+
         setContent {
             ARFilterTheme {
                 Surface(
@@ -57,7 +80,7 @@ class ARFeature : ComponentActivity() {
                     when {
                         hasCameraPermission -> {
                             // Camera permission granted, proceed with the app
-                            // Note: Microphone permission is optional for voice commands
+                            // Note: Microphone and storage permissions are optional but recommended
                             PowerliftingScreen(viewModel = viewModel)
                         }
 
@@ -65,13 +88,20 @@ class ARFeature : ComponentActivity() {
                             // Show permission screen for required permissions
                             PermissionScreen(
                                 onRequestPermission = {
-                                    // Request both camera (required) and microphone (optional)
-                                    requestPermissionsLauncher.launch(
-                                        arrayOf(
-                                            Manifest.permission.CAMERA,
-                                            Manifest.permission.RECORD_AUDIO
-                                        )
+                                    // Request camera (required), microphone and storage (optional)
+                                    val permissionsToRequest = mutableListOf(
+                                        Manifest.permission.CAMERA,
+                                        Manifest.permission.RECORD_AUDIO
                                     )
+
+                                    // Add storage permission based on Android version
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                        permissionsToRequest.add(Manifest.permission.READ_MEDIA_IMAGES)
+                                    } else {
+                                        permissionsToRequest.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                                    }
+
+                                    requestPermissionsLauncher.launch(permissionsToRequest.toTypedArray())
                                 }
                             )
                         }
@@ -80,12 +110,18 @@ class ARFeature : ComponentActivity() {
                             // Permissions were requested but camera was denied
                             PermissionScreen(
                                 onRequestPermission = {
-                                    requestPermissionsLauncher.launch(
-                                        arrayOf(
-                                            Manifest.permission.CAMERA,
-                                            Manifest.permission.RECORD_AUDIO
-                                        )
+                                    val permissionsToRequest = mutableListOf(
+                                        Manifest.permission.CAMERA,
+                                        Manifest.permission.RECORD_AUDIO
                                     )
+
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                        permissionsToRequest.add(Manifest.permission.READ_MEDIA_IMAGES)
+                                    } else {
+                                        permissionsToRequest.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                                    }
+
+                                    requestPermissionsLauncher.launch(permissionsToRequest.toTypedArray())
                                 }
                             )
                         }
