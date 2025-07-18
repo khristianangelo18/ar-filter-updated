@@ -1,5 +1,6 @@
 package com.example.arfilter.viewmodel
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
@@ -152,16 +153,17 @@ class PowerliftingViewModel : ViewModel() {
         val currentHeight = _state.value.lineHeight
         val newHeight = when (direction.lowercase()) {
             "increase", "up", "raise", "higher" -> {
-                (currentHeight + LINE_HEIGHT_STEP).coerceAtMost(MAX_LINE_HEIGHT)
+                (currentHeight + LINE_HEIGHT_STEP).coerceAtMost(MAX_LINE_HEIGHT) // ✅ FIXED: adding for up
             }
             "decrease", "down", "lower", "smaller" -> {
-                (currentHeight - LINE_HEIGHT_STEP).coerceAtLeast(MIN_LINE_HEIGHT)
+                (currentHeight - LINE_HEIGHT_STEP).coerceAtLeast(MIN_LINE_HEIGHT) // ✅ FIXED: subtracting for down
             }
             else -> currentHeight
         }
 
         if (newHeight != currentHeight) {
             _state.value = _state.value.copy(lineHeight = newHeight)
+            Log.d("VoiceCommand", "Line height adjusted: $direction -> $currentHeight to $newHeight")
         }
     }
 

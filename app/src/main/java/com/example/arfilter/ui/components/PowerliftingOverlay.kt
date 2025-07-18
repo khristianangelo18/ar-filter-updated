@@ -61,6 +61,8 @@ fun PowerliftingOverlay(
     }
 }
 
+// In PowerliftingOverlay.kt - Fix the MovementGuide offset calculation
+
 @Composable
 private fun MovementGuide(
     exercise: ExerciseType,
@@ -79,9 +81,12 @@ private fun MovementGuide(
         modifier = modifier
             .height(rangeOfMotionDp + 100.dp)
             .width(130.dp)
-            .offset(y = (lineHeightDp - rangeOfMotionDp) / 2), // Dynamic vertical positioning
+            // ✅ FIXED: Invert the offset so higher lineHeight moves the guide UP
+            .offset(y = -(lineHeightDp - rangeOfMotionDp) / 2), // Added negative sign
         contentAlignment = Alignment.Center
     ) {
+        // ... rest of the MovementGuide code remains the same
+
         // Movement path - vertical line with dynamic height
         Box(
             modifier = Modifier
