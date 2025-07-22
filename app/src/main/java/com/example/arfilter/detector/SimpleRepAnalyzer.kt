@@ -1,15 +1,19 @@
 package com.example.arfilter.detector
 
+import android.util.Log
 import kotlin.math.*
 
 /**
- * Simple analyzer that converts bar path data into useful rep metrics
- * Focused on practical metrics that lifters care about
+ * SIMPLIFIED SimpleRepAnalyzer - Focused on essential metrics only
  */
 class SimpleRepAnalyzer {
 
+    companion object {
+        private const val TAG = "SimpleRepAnalyzer"
+    }
+
     /**
-     * Analyze a completed rep and extract useful metrics
+     * SIMPLIFIED: Analyze a completed rep with only essential metrics
      */
     fun analyzeRep(
         barPath: BarPath,
@@ -19,44 +23,52 @@ class SimpleRepAnalyzer {
     ): RepData? {
 
         val points = barPath.points
-        if (points.size < 10) return null // Need minimum points for analysis
 
-        // Convert normalized coordinates to approximate centimeters
-        // Assume average screen height represents about 60cm of movement
-        val pixelToCm = 60f
+        Log.d(TAG, "🔍 Analyzing rep $repNumber: ${points.size} points")
 
-        // Basic Movement Metrics
-        val totalDistance = calculateTotalDistance(points) * pixelToCm
-        val verticalRange = calculateVerticalRange(points) * pixelToCm
-        val pathDeviation = calculatePathDeviation(points) * pixelToCm
-        val duration = (points.last().timestamp - points.first().timestamp) / 1000f
+        if (points.size < 5) {
+            Log.w(TAG, "❌ Rep $repNumber rejected: insufficient points (${points.size} < 5)")
+            return null
+        }
 
-        // Velocity Calculations
-        val velocities = calculateVelocities(points, pixelToCm)
-        val avgVelocity = velocities.average().toFloat()
-        val peakVelocity = velocities.maxOrNull() ?: 0f
+        try {
+            // Convert normalized coordinates to approximate centimeters
+            // Assume average screen height represents about 60cm of movement
+            val pixelToCm = 60f
 
-        // Phase Analysis
-        val phases = analyzePhases(points)
+            // ESSENTIAL Movement Metrics (SIMPLIFIED)
+            val totalDistance = calculateTotalDistance(points) * pixelToCm
+            val verticalRange = calculateVerticalRange(points) * pixelToCm
 
-        // Quality Score (0-100 based on smoothness and consistency)
-        val qualityScore = calculateQualityScore(points, pathDeviation, velocities)
+            // Validate basic metrics
+            if (totalDistance < 1f || verticalRange < 0.5f) {
+                Log.w(TAG, "❌ Rep $repNumber rejected: invalid metrics (distance=$totalDistance, range=$verticalRange)")
+                return null
+            }
 
-        return RepData(
-            repNumber = repNumber,
-            exercise = exercise,
-            tempo = tempo,
-            totalDistance = totalDistance,
-            verticalRange = verticalRange,
-            avgVelocity = avgVelocity,
-            peakVelocity = peakVelocity,
-            pathDeviation = pathDeviation,
-            duration = duration,
-            eccentricDuration = phases.eccentric,
-            pauseDuration = phases.pause,
-            concentricDuration = phases.concentric,
-            qualityScore = qualityScore
-        )
+            // SIMPLIFIED Quality Score (based on movement consistency and completeness)
+            val qualityScore = calculateSimplifiedQualityScore(points, totalDistance, verticalRange)
+
+            val repData = RepData(
+                repNumber = repNumber,
+                exercise = exercise,
+                tempo = tempo,
+                totalDistance = totalDistance,
+                verticalRange = verticalRange,
+                qualityScore = qualityScore
+            )
+
+            Log.d(TAG, "✅ Rep $repNumber analyzed successfully:")
+            Log.d(TAG, "   - Distance: ${String.format("%.1f", totalDistance)}cm")
+            Log.d(TAG, "   - Range: ${String.format("%.1f", verticalRange)}cm")
+            Log.d(TAG, "   - Quality: ${String.format("%.0f", qualityScore)}%")
+
+            return repData
+
+        } catch (e: Exception) {
+            Log.e(TAG, "💥 Error analyzing rep $repNumber: ${e.message}", e)
+            return null
+        }
     }
 
     private fun calculateTotalDistance(points: List<PathPoint>): Float {
@@ -71,81 +83,101 @@ class SimpleRepAnalyzer {
         return abs(maxY - minY)
     }
 
-    private fun calculatePathDeviation(points: List<PathPoint>): Float {
-        if (points.size < 2) return 0f
-
-        val avgX = points.map { it.x }.average().toFloat()
-        val deviations = points.map { abs(it.x - avgX) }
-        return deviations.average().toFloat()
-    }
-
-    private fun calculateVelocities(points: List<PathPoint>, pixelToCm: Float): List<Float> {
-        if (points.size < 2) return emptyList()
-
-        return points.zipWithNext { a, b ->
-            val distance = a.distanceTo(b) * pixelToCm
-            val timeDiff = (b.timestamp - a.timestamp) / 1000f
-            if (timeDiff > 0) distance / timeDiff else 0f
-        }
-    }
-
-    private data class PhaseBreakdown(
-        val eccentric: Float,
-        val pause: Float,
-        val concentric: Float
-    )
-
-    private fun analyzePhases(points: List<PathPoint>): PhaseBreakdown {
-        if (points.size < 6) {
-            val totalTime = (points.last().timestamp - points.first().timestamp) / 1000f
-            return PhaseBreakdown(totalTime * 0.4f, totalTime * 0.2f, totalTime * 0.4f)
-        }
-
-        // Find direction changes to identify phases
-        val directions = points.zipWithNext { a, b -> b.y - a.y }
-
-        // Simple phase detection based on vertical movement
-        var eccentricEnd = directions.indexOfFirst { it > 0 } // Going down stops
-        if (eccentricEnd == -1) eccentricEnd = directions.size / 3
-
-        var concentricStart = directions.indexOfLast { it < 0 } // Going up starts
-        if (concentricStart == -1) concentricStart = directions.size * 2 / 3
-
-        val eccentricDuration = (points[eccentricEnd].timestamp - points.first().timestamp) / 1000f
-        val pauseDuration = if (concentricStart > eccentricEnd) {
-            (points[concentricStart].timestamp - points[eccentricEnd].timestamp) / 1000f
-        } else 0f
-        val concentricDuration = (points.last().timestamp - points[concentricStart].timestamp) / 1000f
-
-        return PhaseBreakdown(
-            max(0f, eccentricDuration),
-            max(0f, pauseDuration),
-            max(0f, concentricDuration)
-        )
-    }
-
-    private fun calculateQualityScore(
+    /**
+     * SIMPLIFIED quality score calculation
+     * Based on:
+     * 1. Movement completeness (vertical range)
+     * 2. Path efficiency (total distance vs vertical range)
+     * 3. Point density (enough data points)
+     */
+    private fun calculateSimplifiedQualityScore(
         points: List<PathPoint>,
-        pathDeviation: Float,
-        velocities: List<Float>
+        totalDistance: Float,
+        verticalRange: Float
     ): Float {
-        // Quality based on:
-        // 1. Path consistency (lower deviation = higher score)
-        // 2. Velocity smoothness (less erratic = higher score)
-        // 3. Movement completeness
+        try {
+            // 1. Completeness Score (based on vertical range)
+            // Good reps should have decent vertical movement
+            val completenessScore = when {
+                verticalRange >= 15f -> 100f  // Excellent range
+                verticalRange >= 10f -> 80f   // Good range
+                verticalRange >= 5f -> 60f    // Fair range
+                else -> 30f                   // Poor range
+            }
 
-        val deviationScore = max(0f, 100f - (pathDeviation * 100f))
+            // 2. Efficiency Score (path should be reasonably direct)
+            // Ratio of vertical range to total distance (higher is better)
+            val efficiencyRatio = if (totalDistance > 0) verticalRange / totalDistance else 0f
+            val efficiencyScore = when {
+                efficiencyRatio >= 0.8f -> 100f  // Very efficient
+                efficiencyRatio >= 0.6f -> 80f   // Good efficiency
+                efficiencyRatio >= 0.4f -> 60f   // Fair efficiency
+                else -> 40f                       // Poor efficiency
+            }
 
-        val velocityConsistency = if (velocities.isNotEmpty()) {
-            val avgVel = velocities.average()
-            val variance = velocities.map { (it - avgVel).pow(2) }.average()
-            val smoothnessScore = max(0f, 100f - (variance.toFloat() * 10f))
-            smoothnessScore
-        } else 50f
+            // 3. Data Quality Score (based on point count)
+            val dataQualityScore = when {
+                points.size >= 20 -> 100f  // Excellent data
+                points.size >= 15 -> 85f   // Good data
+                points.size >= 10 -> 70f   // Fair data
+                else -> 50f                 // Minimal data
+            }
 
-        val completenessScore = if (points.size >= 20) 100f else (points.size / 20f) * 100f
+            // 4. Consistency Score (check for smooth movement)
+            val consistencyScore = calculateMovementConsistency(points)
 
-        return ((deviationScore * 0.4f) + (velocityConsistency * 0.4f) + (completenessScore * 0.2f))
-            .coerceIn(0f, 100f)
+            // Weighted final score
+            val finalScore = (
+                    completenessScore * 0.3f +      // 30% - movement range
+                            efficiencyScore * 0.3f +        // 30% - path efficiency
+                            dataQualityScore * 0.2f +       // 20% - data quality
+                            consistencyScore * 0.2f         // 20% - movement consistency
+                    ).coerceIn(10f, 100f)
+
+            return finalScore
+
+        } catch (e: Exception) {
+            Log.w(TAG, "Error calculating quality score: ${e.message}")
+            return 50f // Default score if calculation fails
+        }
+    }
+
+    /**
+     * Calculate movement consistency (smooth vs jerky movement)
+     */
+    private fun calculateMovementConsistency(points: List<PathPoint>): Float {
+        if (points.size < 3) return 50f
+
+        try {
+            // Calculate movement smoothness by looking at direction changes
+            var directionChanges = 0
+            var lastDirection = 0f
+
+            for (i in 1 until points.size) {
+                val currentDirection = points[i].y - points[i-1].y
+
+                if (i > 1 && lastDirection != 0f) {
+                    // Check if direction changed significantly
+                    if ((lastDirection > 0 && currentDirection < -0.01f) ||
+                        (lastDirection < 0 && currentDirection > 0.01f)) {
+                        directionChanges++
+                    }
+                }
+                lastDirection = currentDirection
+            }
+
+            // Fewer direction changes = smoother movement = higher score
+            val changeRatio = directionChanges.toFloat() / points.size
+            return when {
+                changeRatio <= 0.1f -> 100f  // Very smooth
+                changeRatio <= 0.2f -> 80f   // Smooth
+                changeRatio <= 0.4f -> 60f   // Somewhat jerky
+                else -> 40f                  // Very jerky
+            }
+
+        } catch (e: Exception) {
+            Log.w(TAG, "Error calculating consistency: ${e.message}")
+            return 50f
+        }
     }
 }

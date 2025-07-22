@@ -4,8 +4,8 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * Simple data class to track individual rep performance
- * Focused on basic metrics that lifters actually care about
+ * SIMPLIFIED RepData class - Focused on essential metrics only
+ * Removed: Avg Velocity, Peak Velocity, Path Deviation, Duration, Eccentric/Pause/Concentric Duration
  */
 data class RepData(
     val repNumber: Int,
@@ -13,30 +13,26 @@ data class RepData(
     val exercise: String,
     val tempo: String,
 
-    // Movement Quality Metrics
+    // ESSENTIAL Movement Quality Metrics (KEPT)
     val totalDistance: Float,           // Total bar path distance
     val verticalRange: Float,           // Pure vertical displacement
-    val avgVelocity: Float,             // Average movement speed
-    val peakVelocity: Float,           // Fastest point in lift
-    val pathDeviation: Float,          // How much bar drifted from vertical
-    val duration: Float,               // Total rep duration in seconds
 
-    // Phase Breakdown
-    val eccentricDuration: Float,      // Time going down
-    val pauseDuration: Float,          // Time at bottom
-    val concentricDuration: Float,     // Time going up
+    // REMOVED: Complex velocity and timing metrics
+    // val avgVelocity: Float,
+    // val peakVelocity: Float,
+    // val pathDeviation: Float,
+    // val duration: Float,
+    // val eccentricDuration: Float,
+    // val pauseDuration: Float,
+    // val concentricDuration: Float,
 
-    // Quality Score (0-100)
-    val qualityScore: Float            // Overall rep quality
+    // Quality Score (KEPT - most important)
+    val qualityScore: Float            // Overall rep quality (0-100)
 ) {
 
     fun getFormattedTimestamp(): String {
         val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
         return formatter.format(Date(timestamp))
-    }
-
-    fun getFormattedDuration(): String {
-        return String.format("%.1f", duration)
     }
 
     fun getFormattedDistance(): String {
@@ -45,16 +41,16 @@ data class RepData(
 
     fun getQualityGrade(): String {
         return when {
-            qualityScore >= 90 -> "A"
-            qualityScore >= 80 -> "B"
-            qualityScore >= 70 -> "C"
-            qualityScore >= 60 -> "D"
-            else -> "F"
+            qualityScore >= 90 -> "A"  // 90%+ = Excellent
+            qualityScore >= 70 -> "B"  // 70-89% = Good
+            qualityScore >= 50 -> "C"  // 50-69% = Fair
+            qualityScore >= 30 -> "D"  // 30-49% = Poor
+            else -> "F"                // <30% = Fail
         }
     }
 
     /**
-     * Convert to CSV row format
+     * SIMPLIFIED CSV row format - Only essential columns
      */
     fun toCsvRow(): String {
         return listOf(
@@ -64,13 +60,6 @@ data class RepData(
             tempo,
             String.format("%.2f", totalDistance),
             String.format("%.2f", verticalRange),
-            String.format("%.2f", avgVelocity),
-            String.format("%.2f", peakVelocity),
-            String.format("%.2f", pathDeviation),
-            getFormattedDuration(),
-            String.format("%.1f", eccentricDuration),
-            String.format("%.1f", pauseDuration),
-            String.format("%.1f", concentricDuration),
             String.format("%.0f", qualityScore),
             getQualityGrade()
         ).joinToString(",")
@@ -78,7 +67,7 @@ data class RepData(
 
     companion object {
         /**
-         * CSV header row
+         * SIMPLIFIED CSV header - Only essential columns
          */
         fun getCsvHeader(): String {
             return listOf(
@@ -88,13 +77,6 @@ data class RepData(
                 "Tempo",
                 "Total_Distance_cm",
                 "Vertical_Range_cm",
-                "Avg_Velocity_cm_s",
-                "Peak_Velocity_cm_s",
-                "Path_Deviation_cm",
-                "Duration_sec",
-                "Eccentric_Duration_sec",
-                "Pause_Duration_sec",
-                "Concentric_Duration_sec",
                 "Quality_Score",
                 "Grade"
             ).joinToString(",")

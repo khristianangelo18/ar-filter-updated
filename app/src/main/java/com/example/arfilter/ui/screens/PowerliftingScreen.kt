@@ -40,6 +40,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -51,6 +52,7 @@ import com.example.arfilter.utils.VoiceCoachManager
 import com.example.arfilter.utils.VoiceCommandManager
 import com.example.arfilter.utils.announcePhaseTransition
 import com.example.arfilter.utils.getExerciseIcon
+import com.example.arfilter.utils.formatTime
 // Import barbell detection components
 import com.example.arfilter.detector.YOLOv11ObjectDetector
 import com.example.arfilter.detector.BitmapUtils
@@ -62,6 +64,7 @@ import com.example.arfilter.detector.MovementAnalysis
 import com.example.arfilter.detector.SessionStats
 import com.example.arfilter.utils.CsvReportManager
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ExecutorService
@@ -95,8 +98,11 @@ fun PowerliftingScreen(
     val csvReportManager = remember { CsvReportManager(context) }
 
     var sessionStats by remember { mutableStateOf(SessionStats(0, 0f, 0f)) }
+
+    // ENHANCED: Better CSV generation states
     var isGeneratingReport by remember { mutableStateOf(false) }
     var lastReportPath by remember { mutableStateOf<String?>(null) }
+    var reportError by remember { mutableStateOf<String?>(null) }
 
     var barPaths by remember { mutableStateOf<List<BarPath>>(emptyList()) }
     var pathAnalysis by remember { mutableStateOf<MovementAnalysis?>(null) }
@@ -194,18 +200,34 @@ fun PowerliftingScreen(
     var previousSetCount by remember { mutableStateOf(0) }
     var previousRestTime by remember { mutableStateOf(0) }
 
-    // Session management functions
+    // ENHANCED: Improved session management functions
     fun startRepSession() {
         enhancedPathManager.startSession()
         sessionStats = SessionStats(0, 0f, 0f)
         lastReportPath = null
+        reportError = null
         Log.d("RepSession", "Started new rep tracking session")
     }
 
-    fun generateRepReport() {
+    fun generateRepReport(reason: String = "Manual") {
         scope.launch {
             isGeneratingReport = true
+            reportError = null
+
             try {
+                Log.d("RepReport", "Starting CSV generation - Reason: $reason")
+
+                // Get completed reps
+                val completedReps = enhancedPathManager.getCompletedReps()
+                Log.d("RepReport", "Found ${completedReps.size} completed reps")
+
+                if (completedReps.isEmpty()) {
+                    reportError = "No reps recorded yet. Complete some reps first!"
+                    Log.w("RepReport", "No completed reps to generate report")
+                    return@launch
+                }
+
+                // Generate the report
                 val reportPath = enhancedPathManager.generateReport(
                     csvManager = csvReportManager,
                     exercise = state.selectedExercise.displayName,
@@ -213,19 +235,32 @@ fun PowerliftingScreen(
                 )
 
                 if (reportPath != null) {
-                    lastReportPath = reportPath
+                    Log.d("RepReport", "✅ Report generated: $reportPath")
+
                     // Automatically share the report
                     val shareSuccess = csvReportManager.shareReport(reportPath)
                     if (shareSuccess) {
-                        Log.d("RepReport", "Report generated and shared: $reportPath")
+                        lastReportPath = reportPath
+                        reportError = null
+                        Log.d("RepReport", "✅ Report shared successfully")
+
+                        // Clear success message after 5 seconds
+                        scope.launch {
+                            delay(5000)
+                            lastReportPath = null
+                        }
                     } else {
+                        reportError = "Report created but sharing failed"
                         Log.e("RepReport", "Failed to share report")
                     }
                 } else {
-                    Log.d("RepReport", "No reps to report")
+                    reportError = "Failed to create report. Check your data."
+                    Log.e("RepReport", "CSV generation returned null")
                 }
+
             } catch (e: Exception) {
-                Log.e("RepReport", "Failed to generate report", e)
+                reportError = "Error: ${e.message}"
+                Log.e("RepReport", "Exception during CSV generation", e)
             } finally {
                 isGeneratingReport = false
             }
@@ -468,7 +503,7 @@ fun PowerliftingScreen(
             totalBarbellReps = totalBarbellReps,
             detectionFps = detectionFps,
             showBarbellTracking = showBarbellTracking,
-            sessionStats = sessionStats, // Added this parameter
+            sessionStats = sessionStats,
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .padding(start = 16.dp, top = 60.dp)
@@ -574,9 +609,9 @@ fun PowerliftingScreen(
             },
             onToggleBarbellTracking = {
                 if (showBarbellTracking) {
-                    // Turning OFF - generate report if we have completed reps
+                    // Turning OFF - auto-generate if we have reps
                     if (enhancedPathManager.getCompletedReps().isNotEmpty()) {
-                        generateRepReport()
+                        generateRepReport("Auto-toggle OFF")
                     }
                 } else {
                     // Turning ON - start new session
@@ -611,7 +646,7 @@ fun PowerliftingScreen(
                 .padding(bottom = 40.dp)
         )
 
-        // Full Controls Panel (Enhanced with barbell detection controls)
+        // ENHANCED: Updated EnhancedPowerliftingControlsPanel with new parameters
         AnimatedVisibility(
             visible = showControls,
             enter = slideInVertically { it } + fadeIn(),
@@ -627,11 +662,12 @@ fun PowerliftingScreen(
                 sessionStats = sessionStats,
                 isGeneratingReport = isGeneratingReport,
                 lastReportPath = lastReportPath,
+                reportError = reportError, // NEW: Pass error state
                 onToggleBarbellTracking = {
                     if (showBarbellTracking) {
-                        // Turning OFF - generate report if we have completed reps
+                        // Turning OFF - auto-generate if we have reps
                         if (enhancedPathManager.getCompletedReps().isNotEmpty()) {
-                            generateRepReport()
+                            generateRepReport("Auto-toggle OFF")
                         }
                     } else {
                         // Turning ON - start new session
@@ -647,12 +683,17 @@ fun PowerliftingScreen(
                         totalBarbellReps = 0
                     }
                 },
+                onGenerateReport = { // NEW: Manual generate callback
+                    generateRepReport("Manual button")
+                },
                 onClearBarPaths = {
                     enhancedPathManager.clearAllPaths()
                     barPaths = emptyList()
                     barbellDetections = emptyList()
                     totalBarbellReps = 0
                     sessionStats = SessionStats(0, 0f, 0f)
+                    lastReportPath = null
+                    reportError = null
                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                 },
                 onCapturePhoto = {
@@ -689,7 +730,7 @@ private fun ModernStatsPanel(
     totalBarbellReps: Int,
     detectionFps: Float,
     showBarbellTracking: Boolean,
-    sessionStats: SessionStats, // Added parameter
+    sessionStats: SessionStats,
     modifier: Modifier = Modifier
 ) {
     // Simple, subtle background based on state
@@ -1325,7 +1366,7 @@ private fun InstructionItem(text: String) {
     )
 }
 
-// Enhanced Controls Panel with Barbell Detection Settings
+// ENHANCED: Updated EnhancedPowerliftingControlsPanel with new parameters
 @Composable
 fun EnhancedPowerliftingControlsPanel(
     state: PowerliftingState,
@@ -1333,10 +1374,12 @@ fun EnhancedPowerliftingControlsPanel(
     voiceCoach: VoiceCoachManager,
     voiceCommandManager: VoiceCommandManager,
     showBarbellTracking: Boolean,
-    sessionStats: SessionStats, // Added parameter
-    isGeneratingReport: Boolean, // Added parameter
-    lastReportPath: String?, // Added parameter
+    sessionStats: SessionStats,
+    isGeneratingReport: Boolean,
+    lastReportPath: String?,
+    reportError: String?, // NEW: Error state
     onToggleBarbellTracking: () -> Unit,
+    onGenerateReport: () -> Unit, // NEW: Manual generate callback
     onClearBarPaths: () -> Unit,
     onCapturePhoto: () -> Unit,
     onDismiss: () -> Unit,
@@ -1386,14 +1429,16 @@ fun EnhancedPowerliftingControlsPanel(
                 }
             }
 
-            // Enhanced Barbell Detection Settings Section with Session Stats
+            // ENHANCED: Barbell Detection Settings Section with Manual Generate Button
             BarbellDetectionSettingsSection(
                 showBarbellTracking = showBarbellTracking,
                 onToggleBarbellTracking = onToggleBarbellTracking,
+                onGenerateReport = onGenerateReport, // NEW
                 onClearBarPaths = onClearBarPaths,
                 sessionStats = sessionStats,
                 isGeneratingReport = isGeneratingReport,
-                lastReportPath = lastReportPath
+                lastReportPath = lastReportPath,
+                reportError = reportError // NEW
             )
 
             // Voice Command Settings Section
@@ -1454,15 +1499,17 @@ fun EnhancedPowerliftingControlsPanel(
     }
 }
 
-// Enhanced Barbell Detection Settings Section with Session Stats and Report Generation
+// ENHANCED: Updated BarbellDetectionSettingsSection with Manual Generate Button
 @Composable
 private fun BarbellDetectionSettingsSection(
     showBarbellTracking: Boolean,
     onToggleBarbellTracking: () -> Unit,
+    onGenerateReport: () -> Unit, // NEW: Manual generate function
     onClearBarPaths: () -> Unit,
-    sessionStats: SessionStats, // Added parameter
-    isGeneratingReport: Boolean, // Added parameter
-    lastReportPath: String? // Added parameter
+    sessionStats: SessionStats,
+    isGeneratingReport: Boolean,
+    lastReportPath: String?,
+    reportError: String? // NEW: Error message state
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SectionHeader(
@@ -1548,12 +1595,51 @@ private fun BarbellDetectionSettingsSection(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    Text(
-                        text = "📊 Turn OFF tracking to generate CSV report",
-                        color = Color.Cyan,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
-                    )
+                    // ENHANCED: Manual generation button
+                    if (sessionStats.totalReps > 0) {
+                        Button(
+                            onClick = onGenerateReport,
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isGeneratingReport,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color.Green.copy(alpha = 0.8f),
+                                disabledContainerColor = Color.Gray.copy(alpha = 0.3f)
+                            )
+                        ) {
+                            if (isGeneratingReport) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    color = Color.White
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Generating...")
+                            } else {
+                                Icon(
+                                    Icons.Default.FileDownload,
+                                    contentDescription = "Generate Report",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Generate CSV Report")
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text(
+                            text = "💡 You can also turn OFF tracking to auto-generate",
+                            color = Color.Cyan,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    } else {
+                        Text(
+                            text = "📊 Start working out to record reps",
+                            color = Color.Cyan,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
 
                     Spacer(modifier = Modifier.height(8.dp))
 
@@ -1587,164 +1673,41 @@ private fun BarbellDetectionSettingsSection(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Generating report...",
+                            text = "Generating CSV report...",
                             color = Color.Cyan,
                             fontSize = 12.sp
                         )
                     }
                 }
 
-                // Last report info
+                // Success message
                 lastReportPath?.let { path ->
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "✅ Report saved and shared",
+                        text = "✅ Report generated and shared successfully!",
                         color = Color.Green,
-                        fontSize = 12.sp
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "File: ${path.substringAfterLast("/")}",
+                        color = Color.Gray,
+                        fontSize = 10.sp
+                    )
+                }
+
+                // Error message
+                reportError?.let { error ->
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "❌ $error",
+                        color = Color.Red,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
                     )
                 }
             }
         }
-    }
-}
-
-private fun DrawScope.drawBarbellDetections(
-    detections: List<Detection>,
-    detector: YOLOv11ObjectDetector?
-) {
-    if (detector == null) return
-
-    val canvasWidth = size.width
-    val canvasHeight = size.height
-
-    detections.forEachIndexed { index, detection ->
-        val bbox = detection.bbox
-
-        val left = (bbox.left * canvasWidth).coerceIn(0f, canvasWidth)
-        val top = (bbox.top * canvasHeight).coerceIn(0f, canvasHeight)
-        val right = (bbox.right * canvasWidth).coerceIn(0f, canvasWidth)
-        val bottom = (bbox.bottom * canvasHeight).coerceIn(0f, canvasHeight)
-
-        val centerX = (left + right) / 2f
-        val centerY = (top + bottom) / 2f
-
-        // Draw center point
-        drawCircle(
-            color = Color.White,
-            radius = 3.dp.toPx(),
-            center = Offset(centerX, centerY)
-        )
-
-        // Draw bounding box if large enough
-        if (right > left + 20f && bottom > top + 20f) {
-            drawRect(
-                color = Color.White,
-                topLeft = Offset(left, top),
-                size = androidx.compose.ui.geometry.Size(right - left, bottom - top),
-                style = Stroke(width = 2.dp.toPx())
-            )
-        }
-    }
-}
-
-private fun DrawScope.drawBarPaths(paths: List<BarPath>) {
-    val canvasWidth = size.width
-    val canvasHeight = size.height
-    val currentTime = System.currentTimeMillis()
-
-    paths.forEachIndexed { pathIndex, path ->
-        val points = path.points
-        if (points.size > 1) {
-            // Draw path with time-based fade effect
-            for (i in 0 until points.size - 1) {
-                val startPoint = points[i]
-                val endPoint = points[i + 1]
-
-                val startX = startPoint.x * canvasWidth
-                val startY = startPoint.y * canvasHeight
-                val endX = endPoint.x * canvasWidth
-                val endY = endPoint.y * canvasHeight
-
-                // Time-based alpha (newer points are more opaque)
-                val timeSincePoint = currentTime - endPoint.timestamp
-                val maxAge = 15000L // 15 seconds
-                val alpha = (1f - (timeSincePoint.toFloat() / maxAge)).coerceIn(0.2f, 1f)
-
-                drawLine(
-                    color = Color.Cyan.copy(alpha = alpha),
-                    start = Offset(startX, startY),
-                    end = Offset(endX, endY),
-                    strokeWidth = 2.dp.toPx(),
-                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 4f), 0f)
-                )
-            }
-
-            // Draw current position (last point) with emphasis
-            if (points.isNotEmpty()) {
-                val lastPoint = points.last()
-                val pointX = lastPoint.x * canvasWidth
-                val pointY = lastPoint.y * canvasHeight
-
-                drawCircle(
-                    color = Color.White,
-                    radius = 4.dp.toPx(),
-                    center = Offset(pointX, pointY)
-                )
-
-                // Outer ring for emphasis
-                drawCircle(
-                    color = Color.White.copy(alpha = 0.5f),
-                    radius = 8.dp.toPx(),
-                    center = Offset(pointX, pointY),
-                    style = Stroke(width = 2.dp.toPx())
-                )
-            }
-        }
-    }
-}
-
-// Helper components
-@Composable
-private fun StatusIndicator(
-    isActive: Boolean,
-    isPaused: Boolean,
-    currentPhase: LiftPhase
-) {
-    val color = when {
-        !isActive -> Color.Gray
-        isPaused -> Color(0xFFFF8C00) // Orange
-        else -> when (currentPhase) {
-            LiftPhase.READY -> Color.White
-            LiftPhase.ECCENTRIC -> Color.Red
-            LiftPhase.BOTTOM -> Color.Yellow
-            LiftPhase.CONCENTRIC -> Color.Green
-            LiftPhase.TOP -> Color.Blue
-            LiftPhase.REST -> Color(0xFFFF8C00)
-        }
-    }
-
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        Box(
-            modifier = Modifier
-                .size(8.dp)
-                .background(
-                    color = color,
-                    shape = CircleShape
-                )
-        )
-        Text(
-            text = when {
-                !isActive -> "READY"
-                isPaused -> "PAUSED"
-                else -> currentPhase.name
-            },
-            color = Color.White,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Medium
-        )
     }
 }
 
@@ -2195,7 +2158,7 @@ private fun TempoRow(
 }
 
 @Composable
-private fun SetConfigurationSection(
+internal fun SetConfigurationSection(
     targetReps: Int,
     onTargetRepsChange: (Int) -> Unit,
     currentSet: Int
@@ -2235,6 +2198,7 @@ private fun SetConfigurationSection(
                     )
                 }
 
+                // Rep counter controls
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(16.dp)
@@ -2309,6 +2273,7 @@ private fun DisplayOptionsSection(
                 modifier = Modifier.padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
+                // Form Cues Toggle
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -2350,6 +2315,7 @@ private fun DisplayOptionsSection(
                     )
                 }
 
+                // Tempo Display Toggle
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -2479,6 +2445,101 @@ private fun SectionHeader(
     }
 }
 
+private fun DrawScope.drawBarbellDetections(
+    detections: List<Detection>,
+    detector: YOLOv11ObjectDetector?
+) {
+    if (detector == null) return
+
+    val canvasWidth = size.width
+    val canvasHeight = size.height
+
+    detections.forEachIndexed { index, detection ->
+        val bbox = detection.bbox
+
+        val left = (bbox.left * canvasWidth).coerceIn(0f, canvasWidth)
+        val top = (bbox.top * canvasHeight).coerceIn(0f, canvasHeight)
+        val right = (bbox.right * canvasWidth).coerceIn(0f, canvasWidth)
+        val bottom = (bbox.bottom * canvasHeight).coerceIn(0f, canvasHeight)
+
+        val centerX = (left + right) / 2f
+        val centerY = (top + bottom) / 2f
+
+        // Draw center point
+        drawCircle(
+            color = Color.White,
+            radius = 3.dp.toPx(),
+            center = Offset(centerX, centerY)
+        )
+
+        // Draw bounding box if large enough
+        if (right > left + 20f && bottom > top + 20f) {
+            drawRect(
+                color = Color.White,
+                topLeft = Offset(left, top),
+                size = androidx.compose.ui.geometry.Size(right - left, bottom - top),
+                style = Stroke(width = 2.dp.toPx())
+            )
+        }
+    }
+}
+
+private fun DrawScope.drawBarPaths(paths: List<BarPath>) {
+    val canvasWidth = size.width
+    val canvasHeight = size.height
+    val currentTime = System.currentTimeMillis()
+
+    paths.forEachIndexed { pathIndex, path ->
+        val points = path.points
+        if (points.size > 1) {
+            // Draw path with time-based fade effect
+            for (i in 0 until points.size - 1) {
+                val startPoint = points[i]
+                val endPoint = points[i + 1]
+
+                val startX = startPoint.x * canvasWidth
+                val startY = startPoint.y * canvasHeight
+                val endX = endPoint.x * canvasWidth
+                val endY = endPoint.y * canvasHeight
+
+                // Time-based alpha (newer points are more opaque)
+                val timeSincePoint = currentTime - endPoint.timestamp
+                val maxAge = 15000L // 15 seconds
+                val alpha = (1f - (timeSincePoint.toFloat() / maxAge)).coerceIn(0.2f, 1f)
+
+                drawLine(
+                    color = Color.Cyan.copy(alpha = alpha),
+                    start = Offset(startX, startY),
+                    end = Offset(endX, endY),
+                    strokeWidth = 2.dp.toPx(),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 4f), 0f)
+                )
+            }
+
+            // Draw current position (last point) with emphasis
+            if (points.isNotEmpty()) {
+                val lastPoint = points.last()
+                val pointX = lastPoint.x * canvasWidth
+                val pointY = lastPoint.y * canvasHeight
+
+                drawCircle(
+                    color = Color.White,
+                    radius = 4.dp.toPx(),
+                    center = Offset(pointX, pointY)
+                )
+
+                // Outer ring for emphasis
+                drawCircle(
+                    color = Color.White.copy(alpha = 0.5f),
+                    radius = 8.dp.toPx(),
+                    center = Offset(pointX, pointY),
+                    style = Stroke(width = 2.dp.toPx())
+                )
+            }
+        }
+    }
+}
+
 // Photo capture function
 private suspend fun capturePhoto(
     context: Context,
@@ -2514,11 +2575,4 @@ private suspend fun capturePhoto(
             }
         }
     )
-}
-
-// Utility function for time formatting
-private fun formatTime(seconds: Int): String {
-    val minutes = seconds / 60
-    val remainingSeconds = seconds % 60
-    return "%d:%02d".format(minutes, remainingSeconds)
 }

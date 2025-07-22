@@ -1,4 +1,4 @@
-// IMPROVED EnhancedPathManager.kt - More consistent path tracking
+// ENHANCED EnhancedPathManager.kt - Better CSV Generation with Validation
 
 package com.example.arfilter.detector
 
@@ -10,12 +10,12 @@ import kotlin.math.abs
 import kotlin.math.sqrt
 
 class EnhancedPathManager(
-    private val maxActivePaths: Int = 1, // REDUCED to 1 for consistency
-    private val pathTimeoutMs: Long = 8000L, // INCREASED timeout
-    private val minPathPoints: Int = 10, // REDUCED for easier completion
-    private val minRepDistance: Float = 0.06f, // REDUCED threshold
-    private val maxJumpDistance: Float = 0.2f, // INCREASED to allow more movement
-    private val trackingTolerance: Float = 0.15f // NEW: Tracking tolerance
+    private val maxActivePaths: Int = 1,
+    private val pathTimeoutMs: Long = 8000L,
+    private val minPathPoints: Int = 10,
+    private val minRepDistance: Float = 0.06f,
+    private val maxJumpDistance: Float = 0.2f,
+    private val trackingTolerance: Float = 0.15f
 ) {
     private val activePaths = mutableListOf<BarPath>()
     private val completedReps = mutableListOf<BarPath>()
@@ -24,10 +24,9 @@ class EnhancedPathManager(
     private var repCounter = 1
     private var sessionStartTime = 0L
 
-    // IMPROVED: Better tracking state
     private var lastValidPoint: PathPoint? = null
     private var consecutiveMisses = 0
-    private val maxConsecutiveMisses = 5 // Allow more misses before giving up
+    private val maxConsecutiveMisses = 5
 
     companion object {
         private const val TAG = "EnhancedPathManager"
@@ -40,7 +39,7 @@ class EnhancedPathManager(
         repCounter = 1
         lastValidPoint = null
         consecutiveMisses = 0
-        Log.d(TAG, "New rep tracking session started")
+        Log.d(TAG, "🟢 NEW SESSION STARTED - Rep tracking initialized")
     }
 
     fun addDetection(detection: Detection, currentTime: Long): List<BarPath> {
@@ -48,35 +47,27 @@ class EnhancedPathManager(
         val centerY = (detection.bbox.top + detection.bbox.bottom) / 2f
         val newPoint = PathPoint(centerX, centerY, currentTime)
 
-        // IMPROVED: Better point validation
         if (!isValidNewPoint(newPoint)) {
             consecutiveMisses++
-            Log.d(TAG, "Invalid point rejected, consecutive misses: $consecutiveMisses")
             return activePaths.toList()
         }
 
-        consecutiveMisses = 0 // Reset on successful detection
-
-        // Find closest active path or create new one
+        consecutiveMisses = 0
         val targetPath = findOrCreatePath(newPoint, currentTime)
 
-        // Add point to path with validation
         if (targetPath != null) {
             targetPath.addPoint(newPoint)
             lastValidPoint = newPoint
 
-            // Ensure path is in active list
             if (!activePaths.contains(targetPath)) {
                 activePaths.add(targetPath)
             }
 
-            Log.d(TAG, "Point added to path. Path now has ${targetPath.points.size} points")
+            Log.v(TAG, "Point added: Path has ${targetPath.points.size} points")
         }
 
-        // Check for completed reps more frequently
         checkForCompletedReps(currentTime)
 
-        // Cleanup less frequently to maintain stability
         if (currentTime - lastCleanupTime > 3000L) {
             cleanupOldPaths(currentTime)
             lastCleanupTime = currentTime
@@ -85,26 +76,20 @@ class EnhancedPathManager(
         return activePaths.toList()
     }
 
-    // IMPROVED: Better point validation
     private fun isValidNewPoint(newPoint: PathPoint): Boolean {
-        // Always accept the first point
         if (lastValidPoint == null) return true
 
         val lastPoint = lastValidPoint!!
         val distance = calculateDistance(newPoint, lastPoint)
         val timeDiff = newPoint.timestamp - lastPoint.timestamp
 
-        // IMPROVED: More lenient distance checking
         if (distance > maxJumpDistance) {
-            Log.d(TAG, "Point rejected: too far (distance: $distance)")
             return false
         }
 
-        // IMPROVED: Time-based validation
         if (timeDiff > 0) {
-            val speed = distance / (timeDiff / 1000f) // pixels per second
-            if (speed > 2.0f) { // Allow higher speeds
-                Log.d(TAG, "Point rejected: too fast (speed: $speed)")
+            val speed = distance / (timeDiff / 1000f)
+            if (speed > 2.0f) {
                 return false
             }
         }
@@ -112,9 +97,7 @@ class EnhancedPathManager(
         return true
     }
 
-    // IMPROVED: Simplified path finding/creation
     private fun findOrCreatePath(newPoint: PathPoint, currentTime: Long): BarPath? {
-        // Try to find existing path
         var bestPath: BarPath? = null
         var bestDistance = Float.MAX_VALUE
 
@@ -123,7 +106,6 @@ class EnhancedPathManager(
                 val lastPoint = path.points.last()
                 val timeDiff = newPoint.timestamp - lastPoint.timestamp
 
-                // Only consider recent paths
                 if (timeDiff < pathTimeoutMs) {
                     val distance = calculateDistance(newPoint, lastPoint)
                     if (distance < trackingTolerance && distance < bestDistance) {
@@ -134,12 +116,10 @@ class EnhancedPathManager(
             }
         }
 
-        // If found good path, use it
         if (bestPath != null) {
             return bestPath
         }
 
-        // Create new path only if we don't have too many
         if (activePaths.size < maxActivePaths) {
             val newPath = BarPath(
                 color = getColorForPathIndex(activePaths.size),
@@ -149,20 +129,18 @@ class EnhancedPathManager(
             return newPath
         }
 
-        // Otherwise, use the most recent path
         return activePaths.maxByOrNull { path ->
             path.points.lastOrNull()?.timestamp ?: 0L
         }
     }
 
-    // IMPROVED: More aggressive rep completion checking
     private fun checkForCompletedReps(currentTime: Long) {
         val pathsToCheck = activePaths.filter { path ->
             val timeSinceLastPoint = currentTime - (path.points.lastOrNull()?.timestamp ?: 0L)
             val hasEnoughPoints = path.points.size >= minPathPoints
-            val hasBeenStable = timeSinceLastPoint > 2000L // 2 seconds of stability
+            val hasBeenStable = timeSinceLastPoint > 2000L
 
-            hasEnoughPoints && (hasBeenStable || path.points.size > 30) // Or if path is long enough
+            hasEnoughPoints && (hasBeenStable || path.points.size > 30)
         }
 
         pathsToCheck.forEach { path ->
@@ -172,48 +150,39 @@ class EnhancedPathManager(
                 activePaths.remove(path)
 
                 Log.d(TAG, "✅ COMPLETED REP #${repCounter} with ${path.points.size} points!")
+                Log.d(TAG, "📊 Total completed reps: ${completedReps.size}")
                 repCounter++
             }
         }
     }
 
-    // IMPROVED: More lenient rep validation
     private fun isCompletedRep(path: BarPath): Boolean {
         val points = path.points
         if (points.size < minPathPoints) {
-            Log.d(TAG, "Path too short: ${points.size} < $minPathPoints")
             return false
         }
 
-        // Check for sufficient vertical movement
         val minY = points.minOf { it.y }
         val maxY = points.maxOf { it.y }
         val verticalRange = abs(maxY - minY)
 
         if (verticalRange < minRepDistance) {
-            Log.d(TAG, "Insufficient vertical movement: $verticalRange < $minRepDistance")
             return false
         }
 
-        // IMPROVED: Simpler pattern recognition
         val hasValidPattern = hasBasicUpDownPattern(points)
         if (!hasValidPattern) {
-            Log.d(TAG, "No valid movement pattern detected")
             return false
         }
 
-        // Duration validation (more lenient)
         val duration = (points.last().timestamp - points.first().timestamp) / 1000f
         if (duration < 0.5f || duration > 30.0f) {
-            Log.d(TAG, "Invalid duration: $duration seconds")
             return false
         }
 
-        Log.d(TAG, "✅ VALID REP: range=$verticalRange, duration=${duration}s, points=${points.size}")
         return true
     }
 
-    // IMPROVED: Simplified pattern detection
     private fun hasBasicUpDownPattern(points: List<PathPoint>): Boolean {
         if (points.size < 6) return false
 
@@ -228,74 +197,123 @@ class EnhancedPathManager(
         val endY = lastQuarter.map { it.y }.average().toFloat()
         val middleY = middle.map { it.y }.average().toFloat()
 
-        // Look for either up-down or down-up pattern
-        val isDownUp = middleY > startY && middleY > endY // Goes down then up
-        val isUpDown = middleY < startY && middleY < endY // Goes up then down
+        val isDownUp = middleY > startY && middleY > endY
+        val isUpDown = middleY < startY && middleY < endY
 
-        val minDifference = 0.03f // Minimum difference to consider valid
+        val minDifference = 0.03f
         val startToMiddle = abs(middleY - startY)
         val middleToEnd = abs(endY - middleY)
 
         val hasSignificantMovement = startToMiddle > minDifference || middleToEnd > minDifference
 
-        Log.d(TAG, "Pattern check - Start: $startY, Middle: $middleY, End: $endY")
-        Log.d(TAG, "IsDownUp: $isDownUp, IsUpDown: $isUpDown, HasMovement: $hasSignificantMovement")
-
         return (isDownUp || isUpDown) && hasSignificantMovement
     }
 
-    // Rest of the functions remain the same...
+    // ENHANCED: Better CSV generation with validation and error handling
     suspend fun generateReport(
         csvManager: CsvReportManager,
         exercise: String,
         tempo: String
     ): String? {
+        Log.d(TAG, "🔄 STARTING CSV GENERATION")
+        Log.d(TAG, "📊 Completed reps count: ${completedReps.size}")
+
+        // ENHANCED: Better validation
         if (completedReps.isEmpty()) {
-            Log.d(TAG, "No completed reps to report")
+            Log.w(TAG, "⚠️ No completed reps to generate report")
             return null
         }
 
-        val repDataList = completedReps.mapIndexedNotNull { index, barPath ->
-            repAnalyzer.analyzeRep(
-                barPath = barPath,
+        // ENHANCED: Validate that we have actual path data
+        val validReps = completedReps.filter { it.points.isNotEmpty() }
+        if (validReps.isEmpty()) {
+            Log.w(TAG, "⚠️ No valid rep data (all reps have empty points)")
+            return null
+        }
+
+        try {
+            // Convert completed paths to RepData with detailed logging
+            val repDataList = mutableListOf<RepData>()
+
+            validReps.forEachIndexed { index, barPath ->
+                Log.d(TAG, "🔍 Analyzing rep ${index + 1}: ${barPath.points.size} points, duration: ${barPath.getDuration()}ms")
+
+                val repData = repAnalyzer.analyzeRep(
+                    barPath = barPath,
+                    exercise = exercise,
+                    tempo = tempo,
+                    repNumber = index + 1
+                )
+
+                if (repData != null) {
+                    repDataList.add(repData)
+                    Log.d(TAG, "✅ Rep ${index + 1} analyzed: Quality=${repData.qualityScore}, Distance=${repData.totalDistance}cm")
+                } else {
+                    Log.w(TAG, "❌ Failed to analyze rep ${index + 1}")
+                }
+            }
+
+            if (repDataList.isEmpty()) {
+                Log.e(TAG, "💥 No valid rep data generated from ${validReps.size} completed reps")
+                return null
+            }
+
+            Log.d(TAG, "📈 Generated ${repDataList.size} valid rep data entries")
+
+            // Create session info
+            val sessionDuration = if (sessionStartTime > 0) {
+                val durationMs = System.currentTimeMillis() - sessionStartTime
+                val minutes = durationMs / (1000 * 60)
+                val seconds = (durationMs % (1000 * 60)) / 1000
+                "${minutes}m ${seconds}s"
+            } else "Unknown"
+
+            val sessionInfo = SessionInfo(
                 exercise = exercise,
                 tempo = tempo,
-                repNumber = index + 1
+                duration = sessionDuration
             )
-        }
 
-        if (repDataList.isEmpty()) {
-            Log.d(TAG, "No valid rep data to report")
+            // Generate the CSV report
+            Log.d(TAG, "📄 Generating CSV file...")
+            val reportPath = csvManager.generateReport(repDataList, sessionInfo)
+
+            if (reportPath != null) {
+                Log.d(TAG, "✅ CSV report generated successfully: $reportPath")
+                Log.d(TAG, "📋 Report contains ${repDataList.size} reps with session duration: $sessionDuration")
+                return reportPath
+            } else {
+                Log.e(TAG, "❌ CSV generation failed - csvManager returned null")
+                return null
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "💥 Exception during CSV generation: ${e.message}", e)
             return null
         }
-
-        val sessionDuration = if (sessionStartTime > 0) {
-            val durationMs = System.currentTimeMillis() - sessionStartTime
-            val minutes = durationMs / (1000 * 60)
-            val seconds = (durationMs % (1000 * 60)) / 1000
-            "${minutes}m ${seconds}s"
-        } else "Unknown"
-
-        val sessionInfo = SessionInfo(
-            exercise = exercise,
-            tempo = tempo,
-            duration = sessionDuration
-        )
-
-        return csvManager.generateReport(repDataList, sessionInfo)
     }
 
     fun getSessionStats(): SessionStats {
-        return SessionStats(
-            totalReps = completedReps.size,
-            averageQuality = if (completedReps.isNotEmpty()) {
-                completedReps.mapNotNull { path ->
+        val validReps = completedReps.size
+        val averageQuality = if (validReps > 0) {
+            completedReps.mapNotNull { path ->
+                try {
                     repAnalyzer.analyzeRep(path, "", "", 0)?.qualityScore
-                }.average().toFloat()
-            } else 0f,
-            sessionDuration = if (sessionStartTime > 0) {
-                (System.currentTimeMillis() - sessionStartTime) / 1000f
-            } else 0f
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to analyze rep for stats: ${e.message}")
+                    null
+                }
+            }.average().toFloat()
+        } else 0f
+
+        val sessionDuration = if (sessionStartTime > 0) {
+            (System.currentTimeMillis() - sessionStartTime) / 1000f
+        } else 0f
+
+        return SessionStats(
+            totalReps = validReps,
+            averageQuality = averageQuality,
+            sessionDuration = sessionDuration
         )
     }
 
@@ -316,9 +334,7 @@ class EnhancedPathManager(
         }
 
         activePaths.removeAll(pathsToRemove)
-        Log.d(TAG, "Cleaned up ${pathsToRemove.size} old paths")
 
-        // Trim points from remaining paths
         activePaths.forEach { path ->
             if (path.points.size > 200) {
                 val keepPoints = path.points.takeLast(150)
@@ -344,7 +360,7 @@ class EnhancedPathManager(
         repCounter = 1
         lastValidPoint = null
         consecutiveMisses = 0
-        Log.d(TAG, "All paths and completed reps cleared")
+        Log.d(TAG, "🧹 All paths and completed reps cleared")
     }
 }
 
@@ -352,4 +368,4 @@ data class SessionStats(
     val totalReps: Int,
     val averageQuality: Float,
     val sessionDuration: Float
- )
+)
